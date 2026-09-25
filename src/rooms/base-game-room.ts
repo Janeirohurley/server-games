@@ -4,6 +4,7 @@ import {
   CloseCode,
   ServerError,
   type Delayed,
+  type Messages,
 } from "colyseus";
 
 import {
@@ -13,6 +14,7 @@ import {
 } from "./schema/lobby-state.js";
 import type { RealtimeIdentity } from "../auth/verify-token.js";
 import type { GameDefinition } from "../games/registry.js";
+import { RoomChat, type RoomChatRequest } from "./room-chat.js";
 
 /**
  * How long a dropped player's seat is held before it is released.
@@ -30,6 +32,7 @@ const RECONNECTION_GRACE_SECONDS = 30;
  *   - the WAITING → READY → PLAYING → FINISHED lifecycle
  *   - targetPlayers vs maxPlayers (creator picks a table size)
  *   - host transfer and reconnection handling (onDrop/onReconnect)
+ *   - the room's ephemeral chat (see room-chat.ts)
  *
  * Game rules are intentionally absent here. Subclasses (see
  * games/ludo/ludo-room.ts) add their own state and messages and call
@@ -44,6 +47,12 @@ export abstract class BaseGameRoom<
   /** Identity attached per session by onAuth. */
   private identities = new Map<string, RealtimeIdentity>();
   private started = false;
+
+  /**
+   * This room's chat. Every game inherits it — nothing below is
+   * game-specific, and no game implements its own.
+   */
+  protected readonly chat = new RoomChat();
 
   public onCreate(options: { targetPlayers?: number } = {}) {
     const def = this.game;
@@ -109,6 +118,7 @@ export abstract class BaseGameRoom<
     if (existing) {
       existing.sessionId = client.sessionId;
       existing.connected = true;
+      this.sendChatSnapshot(client);
       this.broadcast("playerReconnected", { userId: identity.userId });
       return;
     }
@@ -134,6 +144,7 @@ export abstract class BaseGameRoom<
     }
 
     this.refreshReadiness();
+    this.sendChatSnapshot(client);
 
     if (this.state.players.size >= this.maxClients) {
       this.lock();
@@ -159,6 +170,7 @@ export abstract class BaseGameRoom<
     if (!player) return;
     player.sessionId = client.sessionId;
     player.connected = true;
+    this.sendChatSnapshot(client);
     this.broadcast("playerReconnected", { userId: identity.userId });
   }
 
@@ -183,6 +195,86 @@ export abstract class BaseGameRoom<
    * the structural LobbyPlayerLike contract.
    */
   protected abstract createPlayerInstance(): LobbyPlayerLike;
+
+  /**
+   * Register a game's message handlers.
+   *
+   * Games call this instead of assigning `this.messages` directly, so
+   * the generic handlers every room needs — `chatMessage` today — are
+   * merged in and cannot be forgotten or reimplemented per game.
+   */
+  protected registerMessages(handlers: Messages<this>) {
+    this.messages = { ...this.roomMessages(), ...handlers };
+  }
+
+  /** Handlers every room gets, whatever game it runs. */
+  private roomMessages(): Messages<this> {
+    return {
+      chatMessage: (client: Client, message: RoomChatRequest) =>
+        this.handleChatMessage(client, message),
+      chatSync: (client: Client) => this.sendChatSnapshot(client),
+    };
+  }
+
+  /**
+   * A participant sends a chat message.
+   *
+   * The sender's identity comes from this room's own player record, so
+   * a client cannot claim another user's name or id; anything it puts
+   * in the payload beyond `content` is ignored. Rejections go back to
+   * that one client, never to the room.
+   */
+  private handleChatMessage(client: Client, message: RoomChatRequest) {
+    const player = this.playerBySession(client.sessionId);
+    if (!player) {
+      // Connected but not seated (or already gone): not a participant.
+      client.send("chatRejected", { reason: "not-in-room" });
+      return;
+    }
+
+    const result = this.chat.submit(
+      { userId: player.userId, username: player.name },
+      message,
+    );
+
+    if (result.status === "rejected") {
+      client.send("chatRejected", { reason: result.reason });
+      return;
+    }
+
+    // Broadcast reaches only the clients of THIS room, sender included,
+    // so everyone renders the same authoritative message.
+    this.broadcast("chatMessage", result.message);
+  }
+
+  /**
+   * How many messages this room currently holds. Read-only, for
+   * diagnostics and tests — the buffer itself stays private.
+   */
+  public get chatSize(): number {
+    return this.chat.size;
+  }
+
+  /**
+   * Hand a client the room's bounded buffer.
+   *
+   * Pushed on join so a client whose handlers are already registered
+   * gets it with no round trip. That push can lose the race against a
+   * client that registers `onMessage` after the join resolves, so the
+   * `chatSync` message lets it ask again once it is ready. The snapshot
+   * is the whole buffer, so receiving it twice is harmless.
+   */
+  private sendChatSnapshot(client: Client) {
+    client.send("chatSnapshot", { messages: this.chat.snapshot() });
+  }
+
+  /**
+   * Release the room's chat. Games that override onDispose must call
+   * `super.onDispose()` so the buffer is dropped with the room.
+   */
+  public onDispose() {
+    this.chat.dispose();
+  }
 
   /** Delegated lifecycle message: host asks to start. */
   protected handleStartGame(client: Client) {

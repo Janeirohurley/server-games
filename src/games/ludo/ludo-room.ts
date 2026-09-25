@@ -56,13 +56,14 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     super();
     // Register lifecycle + game messages. (Instance field initializers
     // cannot reference `super`, so this happens in the constructor.)
-    this.messages = {
+    // registerMessages merges in the generic room handlers — chat included.
+    this.registerMessages({
       startGame: (client: Client) => this.handleStartGame(client),
       leave: (client: Client) => this.handleLeaveMessage(client),
       rollDice: (client: Client) => this.handleRollDice(client),
       movePiece: (client: Client, message: { pieceIndex?: number }) =>
         this.handleMovePiece(client, message),
-    };
+    });
   }
 
   /** Lobby player record factory — the Ludo player carries color + pieces. */
@@ -227,6 +228,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
 
   public override onDispose() {
     this.turnTimeout?.clear();
+    super.onDispose();
   }
 
   // ------------------------------------------------------------------
