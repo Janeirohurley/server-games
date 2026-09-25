@@ -1,7 +1,6 @@
 import assert from "assert";
-import { ColyseusTestServer, boot } from "@colyseus/testing";
+import { getTestServer, type TestServer } from "./test-server.js";
 
-import appConfig from "../src/app.config.js";
 import type { LudoState } from "../src/games/ludo/ludo-state.js";
 import type { LudoRoom } from "../src/games/ludo/ludo-room.js";
 import { JWT } from "@colyseus/auth";
@@ -21,10 +20,9 @@ async function mintToken(userId: string, name: string): Promise<string> {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 describe("LudoRoom", () => {
-  let colyseus: ColyseusTestServer<typeof appConfig>;
+  let colyseus: TestServer;
 
-  before(async () => (colyseus = await boot(appConfig)));
-  after(async () => colyseus.shutdown());
+  before(async () => (colyseus = await getTestServer()));
   beforeEach(async () => {
     await colyseus.cleanup();
   });

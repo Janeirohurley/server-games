@@ -29,6 +29,12 @@ export const GAMES: readonly GameDefinition[] = [
     minPlayers: 2,
     maxPlayers: 4,
   },
+  {
+    id: "checkers",
+    name: "Checkers",
+    minPlayers: 2,
+    maxPlayers: 2,
+  },
 ] as const;
 
 export function getGameDefinition(gameId: string): GameDefinition | undefined {
