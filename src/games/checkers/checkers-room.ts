@@ -59,12 +59,13 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
 
   constructor() {
     super();
-    this.messages = {
+    // registerMessages merges in the generic room handlers — chat included.
+    this.registerMessages({
       startGame: (client: Client) => this.handleStartGame(client),
       leave: (client: Client) => this.handleLeaveMessage(client),
       move: (client: Client, message: MoveMessage) =>
         this.handleMove(client, message),
-    };
+    });
   }
 
   protected createPlayerInstance(): LobbyPlayerLike {
@@ -163,6 +164,7 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
 
   public override onDispose() {
     this.turnTimeout?.clear();
+    super.onDispose();
   }
 
   // ------------------------------------------------------------------
