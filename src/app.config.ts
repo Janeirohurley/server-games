@@ -12,6 +12,7 @@ import {
  */
 import { MyRoom } from "./rooms/MyRoom.js";
 import { LudoRoom } from "./games/ludo/ludo-room.js";
+import { CheckersRoom } from "./games/checkers/checkers-room.js";
 
 const server = defineServer({
 
@@ -21,6 +22,7 @@ const server = defineServer({
   rooms: {
     my_room: defineRoom(MyRoom),
     ludo: defineRoom(LudoRoom),
+    checkers: defineRoom(CheckersRoom),
   },
 
   /**
