@@ -1,0 +1,15 @@
+node_modules
+build
+.colyseus-cloud.json
+.devmode.json
+
+# Environment files hold the shared realtime secret — never commit them.
+.env
+.env.*
+!.env.example
+
+*.log
+coverage
+.nyc_output
+
+.DS_Store
