@@ -366,13 +366,17 @@ export abstract class BaseGameRoom<
     player.connected = false;
     player.sessionId = "";
     if (this.state.phase === LIFECYCLE.PLAYING) {
-      this.broadcast("playerDisconnected", { userId });
+      // The name travels with the event: by the time a client shows the
+      // notice the player may already be gone from the state, and a
+      // notice that cannot say who it is about is no use.
+      this.broadcast("playerDisconnected", { userId, name: player.name });
     }
   }
 
   private removePlayer(userId: string) {
     const player = this.state.players.get(userId);
     if (!player) return;
+    const name = player.name;
     this.state.players.delete(userId);
     this.identities.delete(player.sessionId);
 
@@ -387,7 +391,7 @@ export abstract class BaseGameRoom<
     // Before start the table shrinks; after start the match continues
     // with the remaining players.
     if (this.state.phase === LIFECYCLE.PLAYING) {
-      this.broadcast("playerLeft", { userId });
+      this.broadcast("playerLeft", { userId, name });
     } else {
       this.refreshReadiness();
     }
