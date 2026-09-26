@@ -36,6 +36,11 @@ describe("RallyRoom", () => {
     const bob = await colyseus.connectTo(room, {
       token: await mintToken("user-b", "Bob"),
     });
+
+    // Every seat beyond the creator's requires admin approval.
+    alice.send("approveJoin", { userId: "user-b" });
+    await tick();
+
     return { room, alice, bob };
   }
 
@@ -126,8 +131,13 @@ describe("RallyRoom", () => {
 
     const alice = await colyseus.connectTo(a, { token: await mintToken("user-a", "Alice") });
     await colyseus.connectTo(a, { token: await mintToken("user-b", "Bob") });
-    await colyseus.connectTo(b, { token: await mintToken("user-c", "Carol") });
+    const carol = await colyseus.connectTo(b, { token: await mintToken("user-c", "Carol") });
     await colyseus.connectTo(b, { token: await mintToken("user-d", "Dan") });
+
+    // Every seat beyond the creator's requires admin approval.
+    alice.send("approveJoin", { userId: "user-b" });
+    carol.send("approveJoin", { userId: "user-d" });
+    await tick();
 
     alice.send("startGame", {});
     await tick();

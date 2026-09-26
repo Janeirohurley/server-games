@@ -3,7 +3,9 @@ import { schema, t, type SchemaType } from "@colyseus/schema";
 import type {
   LobbyPlayerLike,
   LobbyPlayersMapLike,
+  LobbyStateLike,
 } from "../../rooms/schema/lobby-state.js";
+import { PendingRequestSchema, SpectatorSchema } from "../../rooms/schema/lobby-state.js";
 import type { Color } from "./engine/index.js";
 
 // The board encoding is the engine's — the wire format and the rules
@@ -56,6 +58,8 @@ export const CheckersStateSchema = schema({
   phase: t.string().default("waiting"),
   hostUserId: t.string().default(""),
   players: t.map(CheckersPlayerSchema),
+  pendingPlayerRequests: t.map(PendingRequestSchema),
+  spectators: t.map(SpectatorSchema),
 
   // --- checkers-specific fields ---
   /** 64-character board encoding; empty until the match starts. */
@@ -82,9 +86,12 @@ export function colorForSeat(seat: number): Color {
   return SEAT_COLORS[seat % SEAT_COLORS.length];
 }
 
-// Structural conformance: the Checkers player map satisfies the lobby contract.
+// Structural conformance: the Checkers player map satisfies the lobby
+// contract, and the whole state satisfies the base room's contract.
 const _lobbyPlayersCheck: LobbyPlayersMapLike =
   null as unknown as CheckersState["players"];
 const _lobbyPlayerCheck: LobbyPlayerLike = null as unknown as CheckersPlayer;
+const _lobbyStateCheck: LobbyStateLike = null as unknown as CheckersState;
 void _lobbyPlayersCheck;
 void _lobbyPlayerCheck;
+void _lobbyStateCheck;

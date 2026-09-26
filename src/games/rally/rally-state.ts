@@ -3,7 +3,9 @@ import { schema, t, type SchemaType } from "@colyseus/schema";
 import type {
   LobbyPlayerLike,
   LobbyPlayersMapLike,
+  LobbyStateLike,
 } from "../../rooms/schema/lobby-state.js";
+import { PendingRequestSchema, SpectatorSchema } from "../../rooms/schema/lobby-state.js";
 
 /**
  * Rally state synchronized to both clients.
@@ -39,6 +41,8 @@ export const RallyStateSchema = schema({
   phase: t.string().default("waiting"),
   hostUserId: t.string().default(""),
   players: t.map(RallyPlayerSchema),
+  pendingPlayerRequests: t.map(PendingRequestSchema),
+  spectators: t.map(SpectatorSchema),
 
   // --- match state ---
   /** "intro" | "ready" | "playing" | "point" | "paused" | "over". */
@@ -62,9 +66,12 @@ export const RallyStateSchema = schema({
 
 export type RallyState = SchemaType<typeof RallyStateSchema>;
 
-// Structural conformance: the Rally player map satisfies the lobby contract.
+// Structural conformance: the Rally player map satisfies the lobby
+// contract, and the whole state satisfies the base room's contract.
 const _lobbyPlayersCheck: LobbyPlayersMapLike =
   null as unknown as RallyState["players"];
 const _lobbyPlayerCheck: LobbyPlayerLike = null as unknown as RallyPlayer;
+const _lobbyStateCheck: LobbyStateLike = null as unknown as RallyState;
 void _lobbyPlayersCheck;
 void _lobbyPlayerCheck;
+void _lobbyStateCheck;

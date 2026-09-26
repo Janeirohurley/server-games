@@ -1,6 +1,12 @@
 import { schema, t, type SchemaType } from "@colyseus/schema";
 
-import type { LobbyPlayerLike, LobbyPlayersMapLike } from "../../rooms/schema/lobby-state.js";
+import {
+  PendingRequestSchema,
+  SpectatorSchema,
+  type LobbyPlayerLike,
+  type LobbyPlayersMapLike,
+  type LobbyStateLike,
+} from "../../rooms/schema/lobby-state.js";
 
 /**
  * Ludo state synchronized to every client.
@@ -90,6 +96,8 @@ export const LudoStateSchema = schema({
   phase: t.string().default("waiting"),
   hostUserId: t.string().default(""),
   players: t.map(LudoPlayerSchema),
+  pendingPlayerRequests: t.map(PendingRequestSchema),
+  spectators: t.map(SpectatorSchema),
 
   // --- ludo-specific fields ---
   /** userId of whoever may roll/move right now; empty between matches. */
@@ -104,8 +112,11 @@ export const LudoStateSchema = schema({
 
 export type LudoState = SchemaType<typeof LudoStateSchema>;
 
-// Structural conformance: the Ludo player map satisfies the lobby contract.
+// Structural conformance: the Ludo player map satisfies the lobby
+// contract, and the whole state satisfies the base room's contract.
 const _lobbyPlayersCheck: LobbyPlayersMapLike = null as unknown as LudoState["players"];
 const _lobbyPlayerCheck: LobbyPlayerLike = null as unknown as LudoPlayer;
+const _lobbyStateCheck: LobbyStateLike = null as unknown as LudoState;
 void _lobbyPlayersCheck;
 void _lobbyPlayerCheck;
+void _lobbyStateCheck;

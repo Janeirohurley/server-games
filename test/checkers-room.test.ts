@@ -53,6 +53,11 @@ describe("CheckersRoom", () => {
     const clientB = await colyseus.connectTo(room, {
       token: await mintToken("user-b", "Bob"),
     });
+
+    // Every seat beyond the creator's requires admin approval.
+    clientA.send("approveJoin", { userId: "user-b" });
+    await tick();
+
     return { room, clientA, clientB };
   }
 

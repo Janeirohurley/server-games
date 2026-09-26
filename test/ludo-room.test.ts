@@ -55,6 +55,12 @@ describe("LudoRoom", () => {
     const clientB = await colyseus.connectTo(room, {
       token: await mintToken("user-b", "Bob"),
     });
+
+    // Bob waits for admin approval before taking his seat.
+    assert.strictEqual(room.state.players.size, 1);
+    assert.ok(room.state.pendingPlayerRequests.get("user-b"));
+    clientA.send("approveJoin", { userId: "user-b" });
+    await tick();
     assert.strictEqual(room.state.phase, "ready");
 
     // Non-host cannot start.
@@ -84,6 +90,10 @@ describe("LudoRoom", () => {
       token: await mintToken("user-b", "Bob"),
     });
 
+    // Bob waits for admin approval before taking his seat.
+    clientA.send("approveJoin", { userId: "user-b" });
+    await tick();
+
     clientA.send("startGame", {});
     await tick();
 
@@ -107,13 +117,16 @@ describe("LudoRoom", () => {
     const room = (await colyseus.createRoom("ludo", {
       targetPlayers: 2,
     })) as LudoRoom;
-    await colyseus.connectTo(room, {
+    const clientA = await colyseus.connectTo(room, {
       token: await mintToken("user-a", "Alice"),
     });
     await colyseus.connectTo(room, {
       token: await mintToken("user-b", "Bob"),
     });
 
+    // Bob waits for admin approval before taking his seat.
+    clientA.send("approveJoin", { userId: "user-b" });
+    await tick();
     assert.strictEqual(room.state.players.size, 2);
     const joinExtra = async () =>
       colyseus.connectTo(room, {

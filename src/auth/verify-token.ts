@@ -4,21 +4,31 @@
  * The Next.js app signs the token with a shared secret (HS256). We only
  * verify the signature and expiry here — we do NOT own the user accounts,
  * that stays the platform's job. No second user system.
+ *
+ * Two token kinds share the same secret:
+ *   - user tokens (issuer "game-platform"): full identity, can play;
+ *   - guest tokens (issuer "game-platform-guest"): anonymous SPECTATORS
+ *     only. They must never seat, never run a room — the platform keeps
+ *     accounts, watching is open.
  */
 
 import type { JwtPayload } from "@colyseus/auth";
 import { JWT } from "@colyseus/auth";
 
 export interface RealtimeIdentity {
-  /** Platform user id (better-auth `user.id`). */
+  /** Platform user id (better-auth `user.id`), or the guest id. */
   userId: string;
   /** Display name for the lobby and the board. */
   name: string;
+  /** True for anonymous spectators — cannot hold a seat or run the room. */
+  guest?: boolean;
 }
 
 /** Shared env var names, agreed with the Next.js app. */
 export const REALTIME_TOKEN_SECRET_ENV = "REALTIME_TOKEN_SECRET";
 export const REALTIME_TOKEN_ISSUER = "game-platform";
+/** Distinct issuer so a guest token can never pass as a user token. */
+export const REALTIME_GUEST_TOKEN_ISSUER = "game-platform-guest";
 
 export function getRealtimeTokenSecret(): string {
   const secret = process.env[REALTIME_TOKEN_SECRET_ENV];
@@ -31,13 +41,11 @@ export function getRealtimeTokenSecret(): string {
   return secret;
 }
 
-/**
- * Verify a platform JWT and return the caller's identity.
- * Throws when the token is missing, forged or expired.
- */
-export async function verifyRealtimeToken(
+/** Verify and shape a payload into an identity. */
+async function verifyWithIssuer(
   token: string,
-): Promise<RealtimeIdentity> {
+  issuer: string,
+): Promise<{ userId: string; name: string; guest?: true }> {
   if (!token || typeof token !== "string") {
     throw new Error("Missing realtime token");
   }
@@ -47,7 +55,7 @@ export async function verifyRealtimeToken(
   JWT.settings.secret = getRealtimeTokenSecret();
 
   const payload = (await JWT.verify(token, {
-    issuer: REALTIME_TOKEN_ISSUER,
+    issuer,
     algorithms: ["HS256"],
   })) as JwtPayload;
 
@@ -58,5 +66,55 @@ export async function verifyRealtimeToken(
     throw new Error("Realtime token payload is missing required claims");
   }
 
-  return { userId, name };
+  return { userId, name, guest: payload.guest === true ? true : undefined };
+}
+
+/**
+ * Verify a platform USER token. Throws when the token is missing,
+ * forged or expired.
+ */
+export async function verifyRealtimeToken(
+  token: string,
+): Promise<RealtimeIdentity> {
+  const identity = await verifyWithIssuer(token, REALTIME_TOKEN_ISSUER);
+  if (identity.guest) {
+    throw new Error("Guest token used as user token");
+  }
+  return { userId: identity.userId, name: identity.name };
+}
+
+/**
+ * Verify an anonymous SPECTATOR token. Guests watch only: the flag on
+ * the returned identity is what rooms use to deny seats.
+ */
+export async function verifyGuestRealtimeToken(
+  token: string,
+): Promise<RealtimeIdentity> {
+  const identity = await verifyWithIssuer(
+    token,
+    REALTIME_GUEST_TOKEN_ISSUER,
+  );
+  if (!identity.guest || !identity.userId.startsWith("guest-")) {
+    throw new Error("Invalid guest token");
+  }
+  return { userId: identity.userId, name: identity.name, guest: true };
+}
+
+/**
+ * Verify whichever kind of token arrived. User tokens win: a forged
+ * "guest" claim inside a user token is ignored, and a guest token can
+ * never satisfy the user issuer.
+ */
+export async function verifyAnyRealtimeToken(
+  token: string,
+): Promise<RealtimeIdentity> {
+  try {
+    return await verifyRealtimeToken(token);
+  } catch (userError) {
+    try {
+      return await verifyGuestRealtimeToken(token);
+    } catch {
+      throw userError; // surface the user-token error, the usual case
+    }
+  }
 }

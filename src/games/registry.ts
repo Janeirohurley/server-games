@@ -20,6 +20,12 @@ export interface GameDefinition {
   minPlayers: number;
   /** Capacity of the room. */
   maxPlayers: number;
+  /**
+   * Table sizes the creator may pick from. When omitted every size in
+   * [minPlayers, maxPlayers] is allowed. Spectators never count against
+   * these numbers.
+   */
+  allowedPlayerCounts?: readonly number[];
 }
 
 export const GAMES: readonly GameDefinition[] = [
@@ -28,6 +34,7 @@ export const GAMES: readonly GameDefinition[] = [
     name: "Ludo",
     minPlayers: 2,
     maxPlayers: 4,
+    allowedPlayerCounts: [2, 3, 4],
   },
   {
     id: "checkers",
