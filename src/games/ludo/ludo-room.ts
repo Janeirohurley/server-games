@@ -27,6 +27,8 @@ import {
 
 /** How long a player has to act before their turn is skipped. */
 const TURN_DURATION_MS = 30_000;
+/** Pause before a forced move plays itself, so the dice can land first. */
+const AUTO_MOVE_DELAY_MS = 900;
 /** Rolls allowed within one extended turn before it is force-passed. */
 const MAX_EXTRA_ROLLS = 12;
 
@@ -123,15 +125,56 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       snapshotPieces(player),
       value,
     );
-    if (moves.length > 0) return; // wait for the player's choice
 
-    if (value === 6) {
-      // Nothing can move, but a 6 still grants another roll.
-      this.state.diceValue = 0;
-      this.refreshDeadline();
+    /*
+     * Announce the roll as an EVENT, not only as a state field.
+     *
+     * State is delivered as periodic patches, so successive writes in
+     * one tick collapse into the last one. A roll that leads nowhere
+     * sets diceValue and clears it again before any patch goes out, so
+     * no client ever saw the number — which is why the dice sat frozen
+     * for everyone but the roller, whose animation was local.
+     */
+    this.broadcast("diceRolled", {
+      userId: player.userId,
+      name: player.name,
+      value,
+      playable: moves.length,
+    });
+
+    if (moves.length === 0) {
+      if (value === 6) {
+        // Nothing can move, but a 6 still grants another roll.
+        this.state.diceValue = 0;
+        this.refreshDeadline();
+        return;
+      }
+      this.endTurn(player);
       return;
     }
-    this.endTurn(player);
+
+    /*
+     * A single forced move is not a decision, so play it for them. Not
+     * on a 6 though: a 6 also grants another roll, and the player may
+     * prefer to bring a piece out, so that stays their call.
+     *
+     * Delayed so the dice animation has time to land before the piece
+     * sets off — instant would look like the board moved on its own.
+     */
+    if (moves.length === 1 && value !== 6) {
+      const forced = moves[0].pieceIndex;
+      this.delay(AUTO_MOVE_DELAY_MS, () => {
+        // Skip if anything moved on in the meantime (the player got
+        // there first, the turn timed out, the match ended).
+        if (this.state.diceValue !== value) return;
+        if (this.state.currentTurn !== player.userId) return;
+        this.broadcast("autoMoved", { userId: player.userId });
+        this.applyMove(player, forced);
+      });
+      return;
+    }
+
+    // Several options — wait for the player's choice.
   }
 
   /** Player commits a move; the server validates and applies it. */
@@ -150,6 +193,20 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     ) {
       return;
     }
+
+    this.applyMove(player, pieceIndex);
+  }
+
+  /**
+   * Move one of `player`'s pieces by the pending dice value.
+   *
+   * Shared by the player's own choice and by the auto-play that spares
+   * them a forced move, so both paths go through exactly the same
+   * validation, captures and turn handling.
+   */
+  private applyMove(player: LudoPlayer, pieceIndex: number) {
+    const dice = this.state.diceValue;
+    if (dice < 1 || dice > 6) return; // no roll pending
 
     const color = player.color as LudoColor;
     const piece = player.pieces[pieceIndex];
