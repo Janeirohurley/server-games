@@ -1,0 +1,34 @@
+# Render Blueprint — persistent Colyseus realtime server.
+#
+# Deploy with the Render Blueprint flow (render.yaml is auto-detected).
+# This is a long-lived Web Service: rooms, matchmaking and WebSocket
+# connections must survive between requests — never deploy a Colyseus
+# server as a static site or a serverless function.
+#
+# Bun: the repository is Bun-native (bun.lock, Dockerfile pins
+# oven/bun:1.4.2), so the image runtime uses the same version. The build
+# installs exactly the lockfile (`bun install --frozen-lockfile`) inside
+# the image, so Render only needs to build the Docker image — no
+# language-specific buildCommand, no second install path.
+#
+# The Dockerfile compiles TypeScript to build/index.js and the runner
+# stage starts it with `bun build/index.js` — a real foreground process.
+
+services:
+  - type: web
+    name: server-games
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    # Render injects PORT and routes HTTPS/WSS to it; the Colyseus
+    # transport binds every interface (no localhost pinning).
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Shared HMAC key for realtime join tokens. MUST be byte-identical
+      # to the game-platform's REALTIME_TOKEN_SECRET — set it once in the
+      # Render dashboard (Environment), never in this file.
+      - key: REALTIME_TOKEN_SECRET
+        sync: false

@@ -12,6 +12,40 @@ npm start
 
 Then open http://localhost:2567 for the playground, or /monitor for the monitor.
 
+## Deployment (Render)
+
+The repository ships a `render.yaml` Blueprint: one persistent **Web
+Service** (`runtime: docker`) built from the existing Dockerfile
+(bun 1.4.2, `bun install --frozen-lockfile`, `tsc` → `build/index.js`,
+started with `bun build/index.js`).
+
+1. Push this repository to GitHub/GitLab.
+2. In Render: **New → Blueprint**, select the repo — Render detects
+   `render.yaml` and creates the `server-games` web service.
+3. Set the secret when prompted: `REALTIME_TOKEN_SECRET` (same
+   byte-for-byte value as the Next.js platform's `REALTIME_TOKEN_SECRET`.
+   Never commit it).
+4. Wait for the image build, then check `https://<your-service>.onrender.com/health`
+   → `{"status":"ok"}`.
+5. Point the game platform's realtime URL at the service
+   (`wss://<your-service>.onrender.com`); Render terminates TLS and
+   forwards WebSocket traffic — Colyseus matchmaking works unchanged.
+
+Useful checks: the service log shows `⚔️ Listening on …` with the bound
+port; `/health` is the readiness probe; a full matchmaking round-trip
+(create → join → leave) is the real validation, `/health` alone is not.
+
+## Production commands (local)
+
+```
+bun install --frozen-lockfile
+npm run build        # tsc → build/index.js
+npm run start:prod   # bun run build/index.js
+```
+
+`NODE_ENV=production` hides the playground/monitor routes; `PORT`
+selects the listen port (default 2567).
+
 ## Structure
 
 - `src/index.ts`: entry point — leave it alone if you plan to deploy to Colyseus Cloud
