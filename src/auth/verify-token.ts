@@ -20,6 +20,13 @@ export interface RealtimeIdentity {
   userId: string;
   /** Display name for the lobby and the board. */
   name: string;
+  /**
+   * Public gamer tag from the platform's gamer profile (falls back to
+   * the display name when the profile lookup failed on the platform).
+   */
+  gamerTag?: string;
+  /** Avatar URL from the gamer profile, when the player set one. */
+  avatarUrl?: string | null;
   /** True for anonymous spectators — cannot hold a seat or run the room. */
   guest?: boolean;
 }
@@ -45,7 +52,13 @@ export function getRealtimeTokenSecret(): string {
 async function verifyWithIssuer(
   token: string,
   issuer: string,
-): Promise<{ userId: string; name: string; guest?: true }> {
+): Promise<{
+  userId: string;
+  name: string;
+  gamerTag?: string;
+  avatarUrl?: string | null;
+  guest?: true;
+}> {
   if (!token || typeof token !== "string") {
     throw new Error("Missing realtime token");
   }
@@ -66,7 +79,17 @@ async function verifyWithIssuer(
     throw new Error("Realtime token payload is missing required claims");
   }
 
-  return { userId, name, guest: payload.guest === true ? true : undefined };
+  const gamerTag = typeof payload.gamerTag === "string" ? payload.gamerTag : undefined;
+  const avatarUrl =
+    typeof payload.avatarUrl === "string" ? payload.avatarUrl : null;
+
+  return {
+    userId,
+    name,
+    gamerTag,
+    avatarUrl,
+    guest: payload.guest === true ? true : undefined,
+  };
 }
 
 /**
@@ -80,7 +103,12 @@ export async function verifyRealtimeToken(
   if (identity.guest) {
     throw new Error("Guest token used as user token");
   }
-  return { userId: identity.userId, name: identity.name };
+  return {
+    userId: identity.userId,
+    name: identity.name,
+    gamerTag: identity.gamerTag,
+    avatarUrl: identity.avatarUrl,
+  };
 }
 
 /**

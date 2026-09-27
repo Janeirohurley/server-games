@@ -85,6 +85,62 @@ const server = defineServer({
         };
       },
     ),
+
+    /*
+     * Presence lookup for the platform's gamer profiles. Given user
+     * ids (comma-separated, capped), returns only what a profile needs:
+     * the strongest live state per user — playing beats spectating —
+     * plus the game they are in. No names, no room ids beyond that.
+     * Data comes from room metadata, which every room refreshes on
+     * each role change, so a departure is visible immediately.
+     */
+    api_presence: createEndpoint(
+      "/api/presence",
+      { method: "GET" },
+      async (ctx) => {
+        const idsParam =
+          typeof ctx.params?.ids === "string" ? ctx.params.ids : "";
+        const userIds = idsParam
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean)
+          .slice(0, 50);
+
+        if (userIds.length === 0) {
+          return { users: {} };
+        }
+
+        const rooms = await matchMaker.query({});
+        const presence: Record<
+          string,
+          { state: "in-match" | "spectating"; gameId: string }
+        > = {};
+
+        for (const room of rooms) {
+          if (room.metadata?.phase === LIFECYCLE.CLOSED) continue;
+          const gameId = String(room.metadata?.gameId ?? "");
+          if (!gameId) continue;
+
+          const playerIds = Array.isArray(room.metadata?.playerIds)
+            ? (room.metadata.playerIds as unknown[]).map(String)
+            : [];
+          for (const userId of playerIds) {
+            if (!userIds.includes(userId)) continue;
+            presence[userId] = { state: "in-match", gameId };
+          }
+
+          const spectatorIds = Array.isArray(room.metadata?.spectatorIds)
+            ? (room.metadata.spectatorIds as unknown[]).map(String)
+            : [];
+          for (const userId of spectatorIds) {
+            if (!userIds.includes(userId) || presence[userId]) continue;
+            presence[userId] = { state: "spectating", gameId };
+          }
+        }
+
+        return { users: presence };
+      },
+    ),
   }),
 
   /**

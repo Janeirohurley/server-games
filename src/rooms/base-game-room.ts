@@ -21,6 +21,7 @@ import {
 import type { RealtimeIdentity } from "../auth/verify-token.js";
 import type { GameDefinition } from "../games/registry.js";
 import { RoomChat, type RoomChatRequest } from "./room-chat.js";
+import { reportMatchFinished, type ParticipantReport } from "../profile/profile-reporting.js";
 
 /**
  * How long a dropped player's seat is held before it is released.
@@ -677,14 +678,76 @@ export abstract class BaseGameRoom<
     if (!this.canStart()) return false;
     this.started = true;
     this.state.phase = LIFECYCLE.PLAYING;
+    this.matchStartedAt = Date.now();
     this.refreshMetadata();
     return true;
   }
 
-  /** Transition to FINISHED once a game subclass completed its match. */
+  /**
+   * Timestamp (ms) captured when the match flips to PLAYING — the
+   * server-side measure of how long the match actually ran.
+   */
+  private matchStartedAt = 0;
+
+  /**
+   * Transition to FINISHED once a game subclass completed its match.
+   *
+   * This is also where the platform's gamer profile gets fed: every
+   * seated player's outcome is derived from `state.winnerUserId` (empty
+   * = draw) — the one funnel every game room goes through — and
+   * reported once to the platform, signed, fire-and-forget. Games never
+   * report anything themselves; profile code never touches game rules.
+   */
   protected finishMatch() {
     this.state.phase = LIFECYCLE.FINISHED;
     this.refreshMetadata();
+    this.reportMatchOutcome();
+  }
+
+  /**
+   * Derive win/loss/draw for every seated player and hand the result
+   * to the platform. Guests (no account) are skipped: they have no
+   * profile. Reporting failures never propagate to the room.
+   */
+  private reportMatchOutcome(): void {
+    const winnerUserId = this.state.winnerUserId;
+    const participants: ParticipantReport[] = [];
+
+    for (const player of this.state.players.values()) {
+      // Guests can never hold a seat, but a defensive skip keeps a
+      // future schema change from creating ghost profiles.
+      if (player.userId.startsWith("guest-")) continue;
+
+      const outcome =
+        !winnerUserId
+          ? "draw"
+          : player.userId === winnerUserId
+            ? "win"
+            : "loss";
+
+      const durationSeconds = this.matchStartedAt
+        ? Math.max(0, Math.round((Date.now() - this.matchStartedAt) / 1_000))
+        : 0;
+
+      participants.push({
+        userId: player.userId,
+        outcome,
+        seat: player.seat,
+        durationSeconds,
+      });
+    }
+
+    if (participants.length === 0) return;
+
+    void reportMatchFinished({
+      gameId: this.game.id,
+      roomId: this.roomId,
+      participants,
+    }).catch((error) => {
+      // reportMatchFinished already swallows errors; belt and braces —
+      // a reporting bug must never take the room down.
+      console.error("[profile] match report crashed:", error);
+    });
   }
 
   /** Subclass hook called right before the phase flips to PLAYING. */
@@ -728,7 +791,11 @@ export abstract class BaseGameRoom<
     const seat = this.nextFreeSeat();
     const player = this.createPlayerInstance();
     player.userId = identity.userId;
-    player.name = identity.name;
+    // Gaming identity: the roster shows the gamerTag (with a graceful
+    // fallback to the platform name) — but the KEY stays the stable
+    // userId. The profile is never stored in the room state.
+    player.name = identity.gamerTag ?? identity.name;
+    player.avatarUrl = identity.avatarUrl ?? null;
     player.sessionId = sessionId;
     player.seat = seat;
     player.connected = true;
@@ -872,7 +939,12 @@ export abstract class BaseGameRoom<
     return this.state.players.size;
   }
 
-  /** Push the numbers the match list shows into room metadata. */
+  /**
+   * Push the numbers the match list shows into room metadata — plus
+   * the participant ids, which the platform resolves into presence
+   * ("● En ligne", "🎮 En train de jouer"). Ids only: no names, no
+   * profile data — the profile stays the platform's business.
+   */
   private refreshMetadata() {
     this.setMetadata({
       gameId: this.state.gameId,
@@ -882,6 +954,8 @@ export abstract class BaseGameRoom<
       maxPlayers: this.state.maxPlayers,
       spectators: this.state.spectators.size,
       phase: this.state.phase,
+      playerIds: [...this.state.players.values()].map((p) => p.userId),
+      spectatorIds: [...this.state.spectators.values()].map((s) => s.userId),
     });
   }
 

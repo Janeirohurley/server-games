@@ -28,8 +28,10 @@ export type LifecyclePhase = (typeof LIFECYCLE)[keyof typeof LIFECYCLE];
 export const LobbyPlayerSchema = schema({
   /** Platform user id — the stable, persistent identity. */
   userId: t.string(),
-  /** Display name. */
+  /** Display name (gamerTag) shown in rosters and boards. */
   name: t.string(),
+  /** Avatar URL from the gamer profile (null = initials fallback). */
+  avatarUrl: t.string().default(""),
   /** Colyseus session id of the current connection (empty when dropped). */
   sessionId: t.string().default(""),
   /** Seat index assigned in join order; used for turn order. */
@@ -107,6 +109,8 @@ export type LobbyState = SchemaType<typeof LobbyStateSchema>;
 export interface LobbyPlayerLike {
   userId: string;
   name: string;
+  /** Avatar URL from the gamer profile ("" = fallback initials). */
+  avatarUrl: string;
   sessionId: string;
   seat: number;
   connected: boolean;
@@ -159,6 +163,12 @@ export interface LobbyStateLike {
   targetPlayers: number;
   phase: string;
   hostUserId: string;
+  /**
+   * userId of the match winner, set by each game when the match ends.
+   * Empty string while playing or on a draw — the base room reads it
+   * at finishMatch() to derive per-player outcomes for the platform.
+   */
+  winnerUserId: string;
   players: LobbyPlayersMapLike;
   pendingPlayerRequests: LobbyPendingRequestsMapLike;
   spectators: LobbySpectatorsMapLike;
