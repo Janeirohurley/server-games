@@ -6,6 +6,7 @@ import {
   createRouter,
   createEndpoint,
   matchMaker,
+  WebSocketTransport,
 } from "colyseus";
 
 /**
@@ -18,6 +19,13 @@ import { RallyRoom } from "./games/rally/rally-room.js";
 import { LIFECYCLE } from "./rooms/schema/lobby-state.js";
 
 const server = defineServer({
+
+  /*
+   * Explicit WebSocket transport with a raised maxPayload: WebRTC
+   * signaling (SDP offers/answers) routinely exceeds the 4 KB default.
+   * Everything else about the transport stays Colyseus' defaults.
+   */
+  transport: new WebSocketTransport({ maxPayload: 16 * 1024 }),
 
   /**
    * Define your room handlers:

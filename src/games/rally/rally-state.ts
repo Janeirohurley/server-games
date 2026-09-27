@@ -25,6 +25,11 @@ export const RallyPlayerSchema = schema({
   sessionId: t.string().default(""),
   seat: t.uint8().default(0),
   connected: t.boolean().default(true),
+  /** Logical mic state for the voice roster (see base room `voice:mute`). */
+  voiceMuted: t.boolean().default(true),
+  /** Admin-imposed mute (base room `voice:admin-mute`): the target
+   * cannot lift it themselves while set. */
+  adminMuted: t.boolean().default(false),
   /** 0 = near side, 1 = far side. Assigned when the match starts. */
   side: t.uint8().default(0),
 });

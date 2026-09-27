@@ -42,6 +42,11 @@ export const CheckersPlayerSchema = schema({
   sessionId: t.string().default(""),
   seat: t.uint8().default(0),
   connected: t.boolean().default(true),
+  /** Logical mic state for the voice roster (see base room `voice:mute`). */
+  voiceMuted: t.boolean().default(true),
+  /** Admin-imposed mute (base room `voice:admin-mute`): the target
+   * cannot lift it themselves while set. */
+  adminMuted: t.boolean().default(false),
   /** "white" or "black" — assigned from the seat when the match starts. */
   color: t.string().default(""),
 });

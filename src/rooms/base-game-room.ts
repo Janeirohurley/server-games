@@ -3,9 +3,11 @@ import {
   Client,
   CloseCode,
   ServerError,
+  definePlugins,
   type Delayed,
   type Messages,
 } from "colyseus";
+import { WebRTCPlugin } from "colyseus/plugins/webrtc";
 
 import {
   LIFECYCLE,
@@ -66,6 +68,16 @@ export abstract class BaseGameRoom<
 > extends Room<{ state: TState }> {
   /** The game this room runs — provided by each game's room subclass. */
   abstract readonly game: GameDefinition;
+
+  /**
+   * WebRTC signaling for the voice mesh (audio flows peer-to-peer;
+   * Colyseus only relays SDP/ICE). Room-wide infrastructure: every game
+   * inherits it, no game configures it. Clients opt in per connection
+   * with `webrtc:join` — spectators and pending requesters may listen
+   * without ever joining the mesh, and the server refuses `voice:mute`
+   * from anyone who is not a seated player.
+   */
+  plugins = definePlugins({ webrtc: new WebRTCPlugin() });
 
   /** Identity attached per session by onAuth. */
   private identities = new Map<string, RealtimeIdentity>();
@@ -326,7 +338,55 @@ export abstract class BaseGameRoom<
       // Deliberate leave via UI (section 10) — after double confirmation
       // client-side, so the server treats it as final.
       leaveRoom: (client: Client) => this.handleLeaveMessage(client),
+
+      // Voice: the LOGICAL mute state, for the roster UI. Only seated
+      // players may ever set it; the server is the source of truth.
+      "voice:mute": (client: Client, message: { muted?: boolean }) =>
+        this.handleVoiceMute(client, message),
+
+      // Admin power over the call (user request): the room creator may
+      // remotely mute ANOTHER seated player. The target cannot unmute
+      // themselves until the admin lifts it — the server enforces both.
+      "voice:admin-mute": (
+        client: Client,
+        message: { userId?: string; muted?: boolean },
+      ) => this.handleAdminMute(client, message),
     };
+  }
+
+  /** A seated player toggles their logical microphone state. */
+  private handleVoiceMute(client: Client, message: { muted?: boolean }) {
+    const player = this.playerBySession(client.sessionId);
+    if (!player) return; // spectators and guests have no mic on the roster
+
+    // An admin-imposed mute can only be lifted by the admin.
+    if (player.adminMuted && message?.muted === false) return;
+
+    player.voiceMuted = message?.muted !== false;
+  }
+
+  /**
+   * Admin remotely mutes/unmutes another seated player (user request).
+   * While `adminMuted` is set, the target's own unmute calls are
+   * refused — only the admin (or the target leaving) lifts it.
+   */
+  private handleAdminMute(
+    client: Client,
+    message: { userId?: string; muted?: boolean },
+  ) {
+    if (!this.isAdmin(client.sessionId)) return; // admin-only, period
+    const target = this.playerByUserId(String(message?.userId ?? ""));
+    if (!target) return; // unknown / not a seated player
+    if (target.userId === this.state.hostUserId) return; // admin never mutes self
+
+    target.adminMuted = message?.muted !== false;
+    target.voiceMuted = target.adminMuted;
+    // Tell everyone: the target's client disables their mic button and
+    // flips the local track; other rosters refresh the dot.
+    this.broadcast("voice:adminMuted", {
+      userId: target.userId,
+      muted: target.adminMuted,
+    });
   }
 
   /**

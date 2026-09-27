@@ -78,6 +78,11 @@ const LudoPlayerSchemaFields = {
   /** Turn order position (mirrors the lobby seat). */
   seat: t.uint8().default(0),
   connected: t.boolean().default(true),
+  /** Logical mic state for the voice roster (see base room `voice:mute`). */
+  voiceMuted: t.boolean().default(true),
+  /** Admin-imposed mute (base room `voice:admin-mute`): the target
+   * cannot lift it themselves while set. */
+  adminMuted: t.boolean().default(false),
   /** Finished piece count, maintained by the room for cheap victory checks. */
   finished: t.uint8().default(0),
   pieces: t.array(LudoPieceSchema),

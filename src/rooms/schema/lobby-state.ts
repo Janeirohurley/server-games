@@ -36,6 +36,15 @@ export const LobbyPlayerSchema = schema({
   seat: t.uint8().default(0),
   /** Whether this player is currently connected (false while reconnecting). */
   connected: t.boolean().default(true),
+  /**
+   * Logical microphone state, set through the server-validated
+   * `voice:mute` message. Voice activity itself is peer-to-peer and is
+   * NOT server state — clients detect it locally from the audio levels.
+   */
+  voiceMuted: t.boolean().default(true),
+  /** Admin-imposed mute (see base room `voice:admin-mute`). While set,
+   * the player's own unmute requests are refused server-side. */
+  adminMuted: t.boolean().default(false),
 });
 
 export type LobbyPlayer = SchemaType<typeof LobbyPlayerSchema>;
@@ -101,6 +110,8 @@ export interface LobbyPlayerLike {
   sessionId: string;
   seat: number;
   connected: boolean;
+  voiceMuted: boolean;
+  adminMuted: boolean;
 }
 
 export interface LobbySpectatorLike {
