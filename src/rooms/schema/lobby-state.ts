@@ -40,8 +40,9 @@ export const LobbyPlayerSchema = schema({
   connected: t.boolean().default(true),
   /**
    * Logical microphone state, set through the server-validated
-   * `voice:mute` message. Voice activity itself is peer-to-peer and is
-   * NOT server state — clients detect it locally from the audio levels.
+   * `voice:mute` message. The AUDIO itself never crosses this room:
+   * it flows through the LiveKit media server (see `app.config.ts`
+   * membership endpoint); this flag only feeds the rosters.
    */
   voiceMuted: t.boolean().default(true),
   /** Admin-imposed mute (see base room `voice:admin-mute`). While set,

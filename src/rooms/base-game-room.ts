@@ -3,11 +3,9 @@ import {
   Client,
   CloseCode,
   ServerError,
-  definePlugins,
   type Delayed,
   type Messages,
 } from "colyseus";
-import { WebRTCPlugin } from "colyseus/plugins/webrtc";
 
 import {
   LIFECYCLE,
@@ -29,6 +27,15 @@ import { reportMatchFinished, type ParticipantReport } from "../profile/profile-
  * blip does not eject someone from the match.
  */
 const RECONNECTION_GRACE_SECONDS = 30;
+
+/**
+ * A dropped (browser gone, network cut) participant's record is kept
+ * through the reconnection grace, then REAPED: without this, a seat
+ * abandoned in the lobby stayed occupied forever — a ghost player the
+ * room could never start with, and a ghost spectator that inflated the
+ * counter. During a LIVE match the seat is deliberately kept: the
+ * match outcome depends on it (forfeit rules), not on lobby readiness.
+ */
 
 /** How many onlookers a room accepts on top of its players. */
 const MAX_SPECTATORS = 20;
@@ -71,14 +78,13 @@ export abstract class BaseGameRoom<
   abstract readonly game: GameDefinition;
 
   /**
-   * WebRTC signaling for the voice mesh (audio flows peer-to-peer;
-   * Colyseus only relays SDP/ICE). Room-wide infrastructure: every game
-   * inherits it, no game configures it. Clients opt in per connection
-   * with `webrtc:join` — spectators and pending requesters may listen
-   * without ever joining the mesh, and the server refuses `voice:mute`
-   * from anyone who is not a seated player.
+   * Voice/video rides on LiveKit (media transport, server `livekit`),
+   * NOT on Colyseus: this room carries only the LOGICAL voice state
+   * (`voiceMuted` / `adminMuted` through `voice:mute` and
+   * `voice:admin-mute`) that rosters display, and it authorizes media
+   * joins via `/api/room-membership/:roomId`. No SDP/ICE ever crosses
+   * this room — there is deliberately no WebRTC signaling plugin here.
    */
-  plugins = definePlugins({ webrtc: new WebRTCPlugin() });
 
   /** Identity attached per session by onAuth. */
   private identities = new Map<string, RealtimeIdentity>();
@@ -88,6 +94,8 @@ export abstract class BaseGameRoom<
    * by the same user may replace it instead of being refused.
    */
   private liveSessions = new Set<string>();
+  /** Per-room grace (constructor default; onCreate may narrow it). */
+  protected reconnectionGraceSeconds = RECONNECTION_GRACE_SECONDS;
   private started = false;
   private closed = false;
 
@@ -98,7 +106,11 @@ export abstract class BaseGameRoom<
   protected readonly chat = new RoomChat();
 
   public onCreate(
-    options: { targetPlayers?: number; creatorUserId?: string } = {},
+    options: {
+      targetPlayers?: number;
+      creatorUserId?: string;
+      reconnectionGrace?: number;
+    } = {},
   ) {
     const def = this.game;
 
@@ -139,6 +151,18 @@ export abstract class BaseGameRoom<
     // is auto-approved as the first player).
     if (options.creatorUserId) {
       this.state.hostUserId = options.creatorUserId;
+    }
+
+    /*
+     * Reconnection grace, overridable per room (2–120 s). Legitimate
+     * uses: integration tests (a real 30 s wait per case is not one),
+     * kiosk setups. A client-suggested value only ever applies to a
+     * room its creator asked for — and the SDK's own auto-retry still
+     * governs how fast a real reconnection happens.
+     */
+    const grace = Math.trunc(Number(options.reconnectionGrace) || 0);
+    if (grace >= 2 && grace <= 120) {
+      this.reconnectionGraceSeconds = grace;
     }
   }
 
@@ -258,7 +282,7 @@ export abstract class BaseGameRoom<
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     this.markSessionDown(client.sessionId, identity.userId, "dropped");
-    this.allowReconnection(client, RECONNECTION_GRACE_SECONDS);
+    this.allowReconnection(client, this.reconnectionGraceSeconds);
   }
 
   /** A dropped player made it back inside the grace window. */
@@ -294,6 +318,11 @@ export abstract class BaseGameRoom<
     const kind: DepartureKind =
       code === CloseCode.CONSENTED ? "consented" : "dropped";
     this.handleDeparture(identity.userId, client.sessionId, kind);
+
+    // No ghost "…" in the indicator: the session is over for good.
+    this.broadcast("chatTyping", {
+      users: this.chat.stopTyping(identity.userId),
+    });
   }
 
   // ------------------------------------------------------------------
@@ -315,7 +344,12 @@ export abstract class BaseGameRoom<
    * administration — are merged in and cannot be forgotten.
    */
   protected registerMessages(handlers: Messages<this>) {
-    this.messages = { ...this.roomMessages(), ...handlers };
+    // MERGE, never replace: `this.messages` may already carry handlers
+    // registered at construction time (framework behaviour), and a
+    // plain replacement would silently drop them. Games only add their
+    // own handlers; the room's generic ones (chat, join requests,
+    // admin actions) are merged in below.
+    this.messages = { ...this.messages, ...this.roomMessages(), ...handlers };
   }
 
   /** Handlers every room gets, whatever game it runs. */
@@ -324,6 +358,8 @@ export abstract class BaseGameRoom<
       chatMessage: (client: Client, message: RoomChatRequest) =>
         this.handleChatMessage(client, message),
       chatSync: (client: Client) => this.sendChatSnapshot(client),
+      chatTyping: (client: Client, message: { isTyping?: boolean }) =>
+        this.handleChatTyping(client, message),
 
       // Join requests (section 5).
       requestJoinAsPlayer: (client: Client) => this.handleJoinRequest(client),
@@ -422,6 +458,23 @@ export abstract class BaseGameRoom<
   }
 
   /**
+   * A participant signals (or clears) its typing state. The room
+   * relays the whole set rather than per-user deltas — at most a
+   * handful of seats, so simplicity wins. Pruning happens on every
+   * touch, so an abrupt disconnect cannot leave a ghost "…" behind.
+   */
+  private handleChatTyping(client: Client, message: { isTyping?: boolean }) {
+    const sender = this.participantBySession(client.sessionId);
+    if (!sender) return;
+
+    const users = this.chat.setTyping(
+      { userId: sender.userId, username: sender.name },
+      message?.isTyping !== false,
+    );
+    this.broadcast("chatTyping", { users });
+  }
+
+  /**
    * How many messages this room currently holds. Read-only, for
    * diagnostics and tests — the buffer itself stays private.
    */
@@ -439,7 +492,12 @@ export abstract class BaseGameRoom<
    * is the whole buffer, so receiving it twice is harmless.
    */
   private sendChatSnapshot(client: Client) {
-    client.send("chatSnapshot", { messages: this.chat.snapshot() });
+    client.send("chatSnapshot", {
+      messages: this.chat.snapshot(),
+      // Pruned on the way out, so a rejoining client never sees a
+      // stale indicator.
+      typing: this.chat.pruneTyping(),
+    });
   }
 
   /**
@@ -918,15 +976,65 @@ export abstract class BaseGameRoom<
         player.connected = false;
         player.sessionId = "";
         if (this.state.phase === LIFECYCLE.PLAYING) {
+          // A live match keeps the seat: the outcome (forfeit, resume)
+          // depends on it. Only the match's own rules may end it.
           this.broadcast("playerDisconnected", { userId, name: player.name });
+        } else {
+          // Lobby: release the seat when the grace expires — unless the
+          // player made it back in the meantime (reaped record check).
+          this.schedulePhantomReap(userId);
         }
         return;
       }
       const spectator = this.state.spectators.get(userId);
       if (spectator && spectator.sessionId === sessionId) {
         spectator.sessionId = "";
+        // Held for the same grace, then reaped (see schedulePhantomReap).
+        this.schedulePhantomReap(userId);
       }
     }
+  }
+
+  /**
+   * Remove a dropped participant's record once the reconnection grace
+   * has passed — the fix for ghost sessions. Every check re-reads the
+   * CURRENT record: anyone who reclaimed their seat (SDK reconnect or
+   * a fresh join) now has a live sessionId and is left untouched; a
+   * consented leave already deleted the record, making this a no-op.
+   */
+  private schedulePhantomReap(userId: string): void {
+    this.delay(this.reconnectionGraceSeconds * 1000 + 500, () => {
+      const player = this.state.players.get(userId);
+      if (player && !player.connected && player.sessionId === "") {
+        const name = player.name;
+        this.state.players.delete(userId);
+        this.broadcast("playerLeft", { userId, name });
+
+        // Mirror the consented-leave path: a departed admin hands the
+        // room to the most senior remaining player.
+        if (this.state.hostUserId === userId) {
+          const nextAdmin = [...this.state.players.values()].sort(
+            (a, b) => a.seat - b.seat,
+          )[0];
+          this.state.hostUserId = nextAdmin?.userId ?? "";
+          if (nextAdmin) {
+            this.broadcast("hostTransferred", { userId: nextAdmin.userId });
+          }
+        }
+        this.refreshReadiness();
+        return;
+      }
+
+      const spectator = this.state.spectators.get(userId);
+      if (spectator && spectator.sessionId === "") {
+        this.state.spectators.delete(userId);
+        this.broadcast("spectatorLeft", {
+          userId,
+          spectators: this.state.spectators.size,
+        });
+        this.refreshMetadata();
+      }
+    });
   }
 
   private nextFreeSeat(): number {
