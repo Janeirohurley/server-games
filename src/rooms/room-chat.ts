@@ -58,6 +58,21 @@ export const MAX_CONTENT_LENGTH = 300;
 export const RATE_LIMIT_MESSAGES = 5;
 export const RATE_LIMIT_WINDOW_MS = 3_000;
 
+/**
+ * Typing indicator: a participant who stops sending `chatTyping` for
+ * this long is dropped from the set by the next prune. Clients refresh
+ * well before the deadline (2s), so the state naturally flickers off.
+ */
+export const TYPING_TTL_MS = 6_000;
+
+/** Someone currently typing, as broadcast to the room. */
+export interface TypingParticipant {
+  userId: string;
+  name: string;
+  /** Server timestamp of the last signal — clients may sort with it. */
+  at: number;
+}
+
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 const WHITESPACE_RUNS = /\s+/g;
 
@@ -78,6 +93,47 @@ export class RoomChat {
   private sequence = 0;
   /** userId → timestamps of recent accepted messages, for the rate limit. */
   private recent = new Map<string, number[]>();
+  /** userId → { name, last signal }, for the typing indicator. */
+  private typing = new Map<string, { name: string; at: number }>();
+
+  /**
+   * Record (or refresh) a typing signal. The identity comes from the
+   * room's participant record, never from the payload. Returns the
+   * current typing set so the caller can broadcast a diff.
+   */
+  public setTyping(
+    sender: ChatSender,
+    isTyping: boolean,
+    now: number = Date.now(),
+  ): TypingParticipant[] {
+    this.pruneTypingSet(now);
+    if (isTyping) {
+      this.typing.set(sender.userId, { name: sender.username, at: now });
+    } else {
+      this.typing.delete(sender.userId);
+    }
+    return this.typingUsers();
+  }
+
+  /**
+   * Drop every typing entry older than the TTL, then return the set.
+   * Pruning on read keeps the state fresh without any timer at all: a
+   * room nobody types in costs nothing.
+   */
+  public pruneTyping(now: number = Date.now()): TypingParticipant[] {
+    this.pruneTypingSet(now);
+    return this.typingUsers();
+  }
+
+  /** A departed participant must never linger in the indicator. */
+  public stopTyping(
+    userId: string,
+    now: number = Date.now(),
+  ): TypingParticipant[] {
+    this.pruneTypingSet(now);
+    this.typing.delete(userId);
+    return this.typingUsers();
+  }
 
   /**
    * Validate a client request and, if it passes, create the
@@ -110,6 +166,10 @@ export class RoomChat {
     this.remember(sender.userId, now);
     this.sequence += 1;
 
+    // Sending ends the typing state — a signal the client would keep
+    // refreshing otherwise.
+    this.typing.delete(sender.userId);
+
     const message: RoomChatMessage = {
       id: createMessageId(),
       sequence: this.sequence,
@@ -140,6 +200,20 @@ export class RoomChat {
   public dispose(): void {
     this.buffer = [];
     this.recent.clear();
+    this.typing.clear();
+  }
+
+  /** Pure projection of the typing map — callers prune before reading. */
+  private typingUsers(): TypingParticipant[] {
+    return [...this.typing.entries()]
+      .map(([userId, entry]) => ({ userId, name: entry.name, at: entry.at }))
+      .sort((a, b) => a.at - b.at);
+  }
+
+  private pruneTypingSet(now: number): void {
+    for (const [userId, entry] of this.typing) {
+      if (now - entry.at >= TYPING_TTL_MS) this.typing.delete(userId);
+    }
   }
 
   private isRateLimited(userId: string, now: number): boolean {

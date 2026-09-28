@@ -5,6 +5,7 @@ import {
   MAX_CONTENT_LENGTH,
   RATE_LIMIT_MESSAGES,
   RATE_LIMIT_WINDOW_MS,
+  TYPING_TTL_MS,
   RoomChat,
   type ChatResult,
 } from "../src/rooms/room-chat.js";
@@ -217,6 +218,93 @@ describe("RoomChat", () => {
       const snapshot = chat.snapshot();
       snapshot[0].content = "tampered";
       assert.strictEqual(chat.snapshot()[0].content, "original");
+    });
+  });
+
+  describe("typing indicator", () => {
+    it("records a typing signal with the participant record's identity", () => {
+      const chat = new RoomChat();
+      const users = chat.setTyping(ALICE, true, 1_000);
+
+      assert.deepStrictEqual(users, [
+        { userId: "user-a", name: "Alice", at: 1_000 },
+      ]);
+    });
+
+    it("refreshes the timestamp (and name) from the participant record", () => {
+      const chat = new RoomChat();
+      // ChatSender always comes from the room's participant record, so
+      // the name it carries IS the roster's truth — a rename mid-signal
+      // updates the display instead of forking the roster.
+      chat.setTyping(ALICE, true, 1_000);
+      const users = chat.setTyping(
+        { userId: "user-a", username: "Alice II" },
+        true,
+        1_500,
+      );
+      assert.deepStrictEqual(users, [
+        { userId: "user-a", name: "Alice II", at: 1_500 },
+      ]);
+    });
+
+    it("merges several typers, ordered by first signal", () => {
+      const chat = new RoomChat();
+      chat.setTyping(BOB, true, 1_000);
+      chat.setTyping(ALICE, true, 2_000);
+      const users = chat.setTyping(
+        { userId: "user-c", username: "Cleo" },
+        true,
+        3_000,
+      );
+      assert.deepStrictEqual(
+        users.map((u) => u.userId),
+        ["user-b", "user-a", "user-c"],
+      );
+    });
+
+    it("clears a typist that stops", () => {
+      const chat = new RoomChat();
+      chat.setTyping(ALICE, true, 1_000);
+      assert.strictEqual(chat.setTyping(ALICE, false, 1_100).length, 0);
+    });
+
+    it("ends the typing state when the participant sends a message", () => {
+      const chat = new RoomChat();
+      chat.setTyping(ALICE, true, 1_000);
+      accepted(chat.submit(ALICE, { content: "coucou" }, 1_100));
+      assert.deepStrictEqual(chat.pruneTyping(1_100), []);
+    });
+
+    it("prunes stale signals on read — no timer needed", () => {
+      const chat = new RoomChat();
+      chat.setTyping(ALICE, true, 1_000);
+      chat.setTyping(BOB, true, 1_000 + TYPING_TTL_MS - 1_500);
+      // Just before the deadline Alice is still shown; just past it she
+      // is gone while Bob (fresh signal) stays.
+      assert.strictEqual(chat.pruneTyping(1_000 + TYPING_TTL_MS - 1).length, 2);
+      const after = chat.pruneTyping(1_000 + TYPING_TTL_MS + 1);
+      assert.deepStrictEqual(
+        after.map((u) => u.userId),
+        ["user-b"],
+      );
+    });
+
+    it("drops a departed participant outright", () => {
+      const chat = new RoomChat();
+      chat.setTyping(ALICE, true, 1_000);
+      chat.setTyping(BOB, true, 2_000);
+      const after = chat.stopTyping("user-a", 2_100);
+      assert.deepStrictEqual(
+        after.map((u) => u.userId),
+        ["user-b"],
+      );
+    });
+
+    it("drops the typing state with the buffer on disposal", () => {
+      const chat = new RoomChat();
+      chat.setTyping(ALICE, true, 1_000);
+      chat.dispose();
+      assert.deepStrictEqual(chat.pruneTyping(1_100), []);
     });
   });
 
