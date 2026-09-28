@@ -43,7 +43,7 @@ jobs:
       - name: Verify tag matches package.json version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          version="$(bun -e 'console.log(require("./package.json").version)')"
+          version="$(jq -r .version package.json)"
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version v${version}"
             exit 1
