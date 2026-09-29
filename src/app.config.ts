@@ -88,6 +88,63 @@ const server = defineServer({
     ),
 
     /*
+     * ADMIN: full active-room roster for the platform console. Same
+     * matchmaker metadata the public per-game list publishes, but ALL
+     * rooms (every game), plus createdAt for an operational "age"
+     * column. Server-to-server only: the shared REALTIME_TOKEN_SECRET
+     * header authorizes the call (same discipline as
+     * api_room_membership) — the public can never enumerate every room.
+     */
+    api_admin_rooms: createEndpoint(
+      "/api/admin/rooms",
+      { method: "GET" },
+      async (ctx) => {
+        const presented = ctx.getHeader("x-realtime-token-secret");
+        let expected: string;
+        try {
+          expected = getRealtimeTokenSecret();
+        } catch {
+          return new Response(JSON.stringify({ error: "Realtime secret not configured" }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (!presented || presented !== expected) {
+          return new Response(JSON.stringify({ error: "Forbidden" }), {
+            status: 403,
+            headers: { "content-type": "application/json" },
+          });
+        }
+
+        const rooms = await matchMaker.query({});
+        return {
+          rooms: rooms
+            .filter(
+              (room) =>
+                room.metadata?.phase !== LIFECYCLE.CLOSED &&
+                room.metadata?.gameId !== undefined,
+            )
+            .map((room) => ({
+              roomId: room.roomId,
+              createdAt: room.createdAt ?? null,
+              metadata: {
+                gameId: String(room.metadata?.gameId ?? ""),
+                gameName: String(room.metadata?.gameName ?? ""),
+                targetPlayers: Number(room.metadata?.targetPlayers ?? 0),
+                players: Number(room.metadata?.players ?? 0),
+                maxPlayers: Number(room.metadata?.maxPlayers ?? 0),
+                spectators: Number(room.metadata?.spectators ?? 0),
+                playerIds: Array.isArray(room.metadata?.playerIds)
+                  ? (room.metadata.playerIds as unknown[]).map(String)
+                  : [],
+                phase: String(room.metadata?.phase ?? LIFECYCLE.WAITING),
+              },
+            })),
+        };
+      },
+    ),
+
+    /*
      * Presence lookup for the platform's gamer profiles. Given user
      * ids (comma-separated, capped), returns only what a profile needs:
      * the strongest live state per user — playing beats spectating —
