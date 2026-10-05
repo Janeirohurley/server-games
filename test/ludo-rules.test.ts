@@ -4,7 +4,11 @@ import {
   destinationOf,
   legalMoves,
 } from "../src/games/ludo/ludo-rules.js";
-import { FINISHED_POSITION, HOME_COLUMN_START } from "../src/games/ludo/ludo-state.js";
+import {
+  createTrack,
+  FINISHED_POSITION,
+  HOME_COLUMN_START,
+} from "../src/games/ludo/ludo-state.js";
 
 /*
  * Regression pin for the central finish: the center (FINISHED_POSITION
@@ -12,9 +16,14 @@ import { FINISHED_POSITION, HOME_COLUMN_START } from "../src/games/ludo/ludo-sta
  * is unreachable and pieces strand on the last column cell (the client
  * once mirrored a stale `<= 56` bound and could never click a
  * finishing move).
+ *
+ * These cases are table-size independent, so they run on a four-player
+ * track — the size the rules shipped with. The per-size geometry is
+ * pinned separately in `ludo-geometry.test.ts`.
  */
 
 const pieceAt = (position: number, index = 0) => ({ index, position });
+const track = createTrack(4);
 
 describe("Ludo finish — the center is reachable by exact count", () => {
   it("exposes the authoritative constants the client must mirror", () => {
@@ -44,7 +53,7 @@ describe("Ludo finish — the center is reachable by exact count", () => {
   });
 
   it("offers the finishing move among the legal moves", () => {
-    const moves = legalMoves("yellow", [pieceAt(56, 2)], 1);
+    const moves = legalMoves(track, "yellow", [pieceAt(56, 2)], 1);
     assert.strictEqual(moves.length, 1);
     assert.strictEqual(moves[0].toPosition, FINISHED_POSITION);
     assert.strictEqual(moves[0].finishes, true);
@@ -56,7 +65,7 @@ describe("Ludo finish — the center is reachable by exact count", () => {
       null,
     );
     assert.deepStrictEqual(
-      legalMoves("yellow", [pieceAt(FINISHED_POSITION)], 6),
+      legalMoves(track, "yellow", [pieceAt(FINISHED_POSITION)], 6),
       [],
     );
   });
