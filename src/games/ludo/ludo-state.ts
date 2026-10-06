@@ -22,9 +22,13 @@ import {
  *
  * TWO BOARDS, CHOSEN ONCE PER TABLE FROM `targetPlayers`:
  *
- *   classic (2-4 players): the board the product shipped with. One shared
- *     ring of 52 cells, home column at 51-56, finish at 57. Untouched:
- *     a four-player table keeps start offsets 0/13/26/39.
+ *   classic (2-4 players): a four-armed cross, the board a player expects.
+ *     One shared ring of 52 cells, home column at 51-56, finish at 57.
+ *     THE BOARD IS FIXED: four start corners (0/13/26/39), four home columns
+ *     and four pairs of safe cells, whatever the player count. A two-player
+ *     table is the same cross with two arms left empty, not a re-spaced ring.
+ *     A four-player table keeps start offsets 0/13/26/39 and safe cells
+ *     0/7/13/20/26/33/39/46, so its rules are unchanged.
  *
  *   hex (5-6 players): a six-armed star. Each arm is 3 cells wide and 6
  *     deep, which gives 13 ring cells per arm and 78 on the whole ring.
@@ -78,6 +82,26 @@ export const LUDO_PALETTE = [
 ] as const;
 export type LudoColor = (typeof LUDO_PALETTE)[number];
 
+/**
+ * The four fixed start corners of the classic board, in arm order (left, top,
+ * right, bottom). These belong to the BOARD and never depend on the player
+ * count: the four-player table must keep 0/13/26/39 exactly, and a smaller
+ * table simply leaves one or two arms empty.
+ */
+export const CLASSIC_ARM_OFFSETS = [0, 13, 26, 39] as const;
+/** The star sits this many cells after each fixed start corner. */
+export const CLASSIC_STAR_OFFSET = 7;
+/**
+ * Which fixed arms are occupied, per table size. Corners 0 and 26 are
+ * opposite (left and right), so a two-player table is the duel those two
+ * colors are printed for; a three-player table leaves the bottom arm empty.
+ */
+export const CLASSIC_OCCUPIED_ARMS: Readonly<Record<number, readonly number[]>> = {
+  2: [0, 26],
+  3: [0, 13, 26],
+  4: [0, 13, 26, 39],
+};
+
 export const MIN_PLAYER_COUNT = 2;
 export const MAX_PLAYER_COUNT = LUDO_PALETTE.length;
 
@@ -106,7 +130,11 @@ export interface LudoTrack {
   readonly colors: readonly LudoColor[];
   /** Start offset on the shared ring, per color. */
   readonly offsets: ReadonlyMap<LudoColor, number>;
-  /** Start cells plus one star cell per segment. */
+  /**
+   * Every start and star cell of the BOARD, occupied arms or not. On a
+   * two-player classic table this is still the eight classic cells: the four
+   * arms are printed on the board whatever the roster.
+   */
   readonly safeCells: ReadonlySet<number>;
   /** Ring cell a color's piece sits on for a given path index. */
   ringIndexOf(color: LudoColor, pathIndex: number): number;
@@ -136,34 +164,41 @@ export function createTrack(playerCount: number): LudoTrack {
   const colors = LUDO_PALETTE.slice(0, playerCount) as LudoColor[];
   const hex = playerCount >= HEX_MIN_PLAYER_COUNT;
   const ringLength = hex ? HEX_RING_LENGTH : RING_LENGTH;
-  const segment = ringLength / playerCount;
 
   const offsets = new Map<LudoColor, number>();
   const safeCells = new Set<number>();
-  for (let seat = 0; seat < playerCount; seat += 1) {
-    const color = colors[seat];
-    if (hex) {
-      // One arm per seat: the starts are exactly 13 cells apart.
-      offsets.set(color, seat * HEX_ARM_LENGTH);
-      continue;
-    }
-    // Rounding spreads the rounding error over the whole ring instead of
-    // accumulating it: three players get 17/18/17 rather than 17/17/18.
-    const offset = Math.round(seat * segment) % RING_LENGTH;
-    offsets.set(color, offset);
-    safeCells.add(offset);
-    // The star sits at the middle of the segment this player owns, so it
-    // is always equidistant from the two start cells it protects between.
-    safeCells.add((offset + Math.round(segment / 2)) % RING_LENGTH);
-  }
 
   if (hex) {
+    // One arm per seat: the starts are exactly 13 cells apart.
+    for (let seat = 0; seat < playerCount; seat += 1) {
+      offsets.set(colors[seat], seat * HEX_ARM_LENGTH);
+    }
     // The safe cells belong to the BOARD, not to who sits at it: the empty
     // arm of a five-player table keeps its start and its star, so the two
     // hexagonal tables are the same drawing.
     for (let arm = 0; arm < HEX_ARM_COUNT; arm += 1) {
       safeCells.add(arm * HEX_ARM_LENGTH);
       safeCells.add(arm * HEX_ARM_LENGTH + HEX_STAR_OFFSET);
+    }
+  } else {
+    // The classic board has FOUR FIXED arms: four start corners, four home
+    // columns, four safe-cell pairs. `playerCount` only decides which arms are
+    // occupied — a two-player table is not a shorter board, it is the same
+    // board with two empty arms, exactly like a printed board with two
+    // colours in use. Re-spacing the ring by the player count (the previous
+    // behaviour) moved starts into the middle of an arm and made the rules
+    // differ per table size for no gameplay reason.
+    const occupied = CLASSIC_OCCUPIED_ARMS[playerCount];
+    if (!occupied) {
+      throw new Error(`Unsupported classic Ludo table size ${playerCount}`);
+    }
+    occupied.forEach((armOffset, seat) => {
+      offsets.set(colors[seat], armOffset);
+    });
+    // Every arm keeps its start and its star, occupied or not.
+    for (const armOffset of CLASSIC_ARM_OFFSETS) {
+      safeCells.add(armOffset);
+      safeCells.add((armOffset + CLASSIC_STAR_OFFSET) % RING_LENGTH);
     }
   }
 

@@ -24,15 +24,19 @@ import {
 
 const piece = (index: number, position: number): RulePiece => ({ index, position });
 
-// Valeurs relevées sur le code AVANT l'ajout du plateau hexagonal : les tables
-// à 2, 3 et 4 joueurs ne doivent pas bouger d'une case.
-const CLASSIC_BEFORE: Record<number, { offsets: number[]; safe: number[] }> = {
-  2: { offsets: [0, 26], safe: [0, 13, 26, 39] },
-  3: { offsets: [0, 17, 35], safe: [0, 9, 17, 26, 35, 44] },
-  4: { offsets: [0, 13, 26, 39], safe: [0, 7, 13, 20, 26, 33, 39, 46] },
+// La croix classique a quatre bras FIXES. `playerCount` ne choisit plus que
+// les bras occupés, donc les tables à 2 et 3 joueurs ne sont plus des anneaux
+// re-espacés (0/17/35) mais la même croix que la table à 4, avec des bras
+// vides. Ces valeurs sont le contrat canonique, et les 4 joueurs restent
+// exactement ceux qui ont été livrés.
+const CLASSIC_OFFSETS: Record<number, number[]> = {
+  2: [0, 26],
+  3: [0, 13, 26],
+  4: [0, 13, 26, 39],
 };
+const CLASSIC_SAFE = [0, 7, 13, 20, 26, 33, 39, 46];
 
-describe("tables 2 à 4 joueurs : strictement identiques à avant", () => {
+describe("tables 2 à 4 joueurs : la même croix à quatre bras", () => {
   for (const n of [2, 3, 4]) {
     it(`${n} joueurs : mêmes départs, mêmes cases sûres, anneau 52, arrivée 57`, () => {
       const track = createTrack(n);
@@ -40,8 +44,10 @@ describe("tables 2 à 4 joueurs : strictement identiques à avant", () => {
       assert.equal(track.ringLength, RING_LENGTH);
       assert.equal(track.homeColumnStart, HOME_COLUMN_START);
       assert.equal(track.finishedPosition, FINISHED_POSITION);
-      assert.deepEqual([...track.offsets.values()], CLASSIC_BEFORE[n].offsets);
-      assert.deepEqual([...track.safeCells].sort((a, b) => a - b), CLASSIC_BEFORE[n].safe);
+      assert.deepEqual([...track.offsets.values()], CLASSIC_OFFSETS[n]);
+      // Les huit cases sûres ne dépendent pas de la taille : elles sont
+      // imprimées sur le plateau, bras occupés ou non.
+      assert.deepEqual([...track.safeCells].sort((a, b) => a - b), CLASSIC_SAFE);
       for (const color of track.colors) {
         const offset = track.offsets.get(color)!;
         for (let path = 0; path < FINISHED_POSITION; path++) {

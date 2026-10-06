@@ -1,6 +1,9 @@
 import assert from "assert";
 
 import {
+  CLASSIC_ARM_OFFSETS,
+  CLASSIC_OCCUPIED_ARMS,
+  CLASSIC_STAR_OFFSET,
   createTrack,
   FINISHED_POSITION,
   HOME_COLUMN_START,
@@ -80,22 +83,38 @@ describe("Ludo — construction de la piste", () => {
     }
   });
 
-  it("répartit les segments aussi également que 52 cases le permettent", () => {
+  it("n'assoit les joueurs que sur les quatre coins fixes du plateau", () => {
     for (const size of CLASSIC_SIZES) {
-      const offsets = offsetsOf(createTrack(size)).sort((a, b) => a - b);
-      const segments: number[] = [];
-      for (let i = 0; i < size; i += 1) {
-        segments.push(
-          (offsets[(i + 1) % size] - offsets[i] + RING_LENGTH) % RING_LENGTH,
+      const offsets = offsetsOf(createTrack(size));
+      for (const offset of offsets) {
+        assert.ok(
+          CLASSIC_ARM_OFFSETS.includes(offset as 0 | 13 | 26 | 39),
+          `départ ${offset} hors des coins du plateau pour ${size} joueurs`,
         );
       }
-      // 52 = 2 x 2 x 13 : seuls 2 et 4 divisent l'anneau. Sinon les
-      // segments ont une case d'écart, pas davantage.
-      assert.ok(
-        Math.max(...segments) - Math.min(...segments) <= 1,
-        `segments ${segments.join(",")} trop irréguliers pour ${size} joueurs`,
+      // L'ordre du plateau est conservé, donc le siège 0 reste le coin 0 et
+      // les couleurs tournent toujours dans le même sens.
+      assert.deepStrictEqual(
+        [...offsets].sort((a, b) => a - b),
+        offsets,
+        `départs hors ordre pour ${size} joueurs : ${offsets.join(",")}`,
       );
+      assert.strictEqual(offsets[0], 0);
     }
+  });
+
+  it("laisse les bras du plateau fixes quand la table est plus petite", () => {
+    // C'est l'invariant central : une table à 2 ou 3 joueurs joue sur la
+    // croix complète, pas sur un anneau raccourci.
+    assert.deepStrictEqual([...CLASSIC_ARM_OFFSETS], [0, 13, 26, 39]);
+    assert.deepStrictEqual([...CLASSIC_OCCUPIED_ARMS[2]], [0, 26]);
+    assert.deepStrictEqual([...CLASSIC_OCCUPIED_ARMS[3]], [0, 13, 26]);
+    assert.deepStrictEqual([...CLASSIC_OCCUPIED_ARMS[4]], [0, 13, 26, 39]);
+  });
+
+  it("oppose les deux coins occupés d'une table à 2 joueurs", () => {
+    const offsets = offsetsOf(createTrack(2));
+    assert.strictEqual(Math.abs(offsets[1] - offsets[0]), 26);
   });
 
   it("refuse de calculer une piste pour une couleur non assise", () => {
@@ -110,7 +129,9 @@ describe("Ludo — construction de la piste", () => {
 describe("Ludo — le plateau 4 joueurs reste exactement celui qui a été livré", () => {
   // Ces valeurs sont une épingle de régression, pas un calcul : le
   // client 4 joueurs a ces cases codées en dur dans ses données de
-  // plateau. Les changer casse la table déjà en jeu.
+  // plateau. Les changer casse la table déjà en jeu. La croix à quatre bras
+  // fixes en fait l'ancrage : à 4 joueurs le contrat est identique, aux
+  // autres tailles il devient enfin cohérent avec lui.
   it("conserve les départs 0 / 13 / 26 / 39", () => {
     const track = createTrack(4);
     assert.deepStrictEqual(
@@ -138,41 +159,43 @@ describe("Ludo — le plateau 4 joueurs reste exactement celui qui a été livr�
 });
 
 describe("Ludo — cases sûres", () => {
-  it("protège chaque départ et une étoile par segment", () => {
+  it("protège les quatre départs et leurs quatre étoiles, quelle que soit la taille", () => {
     for (const size of CLASSIC_SIZES) {
       const track = createTrack(size);
-      assert.strictEqual(
-        track.safeCells.size,
-        size * 2,
-        `attendu ${size * 2} cases sûres pour ${size} joueurs, obtenu ${track.safeCells.size}`,
+      // Les cases sûres sont une propriété du plateau imprimé : les huit
+      // restent les mêmes à 2, 3 ou 4 joueurs. On vérifie l'ensemble trié
+      // plutôt qu'un compte, sinon un bras vide pourrait en disparaître.
+      const sorted = [...track.safeCells].sort((a, b) => a - b);
+      assert.deepStrictEqual(
+        sorted,
+        [0, 7, 13, 20, 26, 33, 39, 46],
+        `cases sûres inattendues pour ${size} joueurs : ${sorted.join(",")}`,
       );
-      for (const offset of offsetsOf(track)) {
-        assert.ok(track.isSafeCell(offset), `départ ${offset} non protégé`);
-      }
-    }
-  });
-
-  it("place l'étoile au milieu du segment, jamais sur un départ", () => {
-    for (const size of CLASSIC_SIZES) {
-      const track = createTrack(size);
-      const segment = RING_LENGTH / size;
-      const offsets = offsetsOf(track);
-      for (const offset of offsets) {
-        const star = (offset + Math.round(segment / 2)) % RING_LENGTH;
-        assert.ok(track.isSafeCell(star), `étoile ${star} absente`);
-        // Une étoile sur un départ rendrait deux segments voisins
-        // partiellement indiscernables.
+      for (const armOffset of CLASSIC_ARM_OFFSETS) {
         assert.ok(
-          !offsets.includes(star),
-          `l'étoile ${star} chevauche un départ (${size} joueurs)`,
+          track.isSafeCell(armOffset),
+          `coin ${armOffset} non protégé pour ${size} joueurs`,
         );
       }
     }
   });
 
+  it("conserve l'étoile du plateau 4 joueurs, inchangée", () => {
+    // Épingle de régression : le contrat 4 joueurs ne doit jamais bouger,
+    // il est celui qui a été livré.
+    assert.strictEqual(CLASSIC_STAR_OFFSET, 7);
+    for (const size of CLASSIC_SIZES) {
+      const track = createTrack(size);
+      assert.deepStrictEqual(
+        [...createTrack(4).safeCells].sort((a, b) => a - b),
+        [...track.safeCells].sort((a, b) => a - b),
+      );
+    }
+  });
+
   it("laisse les cases ordinaires attaquables", () => {
     const track = createTrack(3);
-    for (const ring of [1, 2, 3, 5, 6, 7, 8]) {
+    for (const ring of [1, 2, 3, 5, 6, 8, 9, 10, 11, 12]) {
       assert.ok(!track.isSafeCell(ring), `la case ${ring} ne doit pas être sûre`);
     }
     // Plateau hexagonal : sûres = départ (13k) et étoile (13k + 8).
