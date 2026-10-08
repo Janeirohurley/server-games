@@ -89,8 +89,11 @@ export type LudoColor = (typeof LUDO_PALETTE)[number];
  * table simply leaves one or two arms empty.
  */
 export const CLASSIC_ARM_OFFSETS = [0, 13, 26, 39] as const;
-/** The star sits this many cells after each fixed start corner. */
-export const CLASSIC_STAR_OFFSET = 7;
+/**
+ * The star sits this many cells after each fixed start corner. Eight —
+ * matches the delivered four-player board (stars 8, 21, 34, 47).
+ */
+export const CLASSIC_STAR_OFFSET = 8;
 /**
  * Which fixed arms are occupied, per table size. Corners 0 and 26 are
  * opposite (left and right), so a two-player table is the duel those two

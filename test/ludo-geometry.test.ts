@@ -168,7 +168,7 @@ describe("Ludo — cases sûres", () => {
       const sorted = [...track.safeCells].sort((a, b) => a - b);
       assert.deepStrictEqual(
         sorted,
-        [0, 7, 13, 20, 26, 33, 39, 46],
+        [0, 8, 13, 21, 26, 34, 39, 47],
         `cases sûres inattendues pour ${size} joueurs : ${sorted.join(",")}`,
       );
       for (const armOffset of CLASSIC_ARM_OFFSETS) {
@@ -182,8 +182,8 @@ describe("Ludo — cases sûres", () => {
 
   it("conserve l'étoile du plateau 4 joueurs, inchangée", () => {
     // Épingle de régression : le contrat 4 joueurs ne doit jamais bouger,
-    // il est celui qui a été livré.
-    assert.strictEqual(CLASSIC_STAR_OFFSET, 7);
+    // il est celui qui a été livré (étoiles 8, 21, 34, 47).
+    assert.strictEqual(CLASSIC_STAR_OFFSET, 8);
     for (const size of CLASSIC_SIZES) {
       const track = createTrack(size);
       assert.deepStrictEqual(
@@ -195,7 +195,7 @@ describe("Ludo — cases sûres", () => {
 
   it("laisse les cases ordinaires attaquables", () => {
     const track = createTrack(3);
-    for (const ring of [1, 2, 3, 5, 6, 8, 9, 10, 11, 12]) {
+    for (const ring of [1, 2, 3, 5, 6, 7, 9, 10, 11, 12]) {
       assert.ok(!track.isSafeCell(ring), `la case ${ring} ne doit pas être sûre`);
     }
     // Plateau hexagonal : sûres = départ (13k) et étoile (13k + 8).

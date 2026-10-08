@@ -34,7 +34,7 @@ const CLASSIC_OFFSETS: Record<number, number[]> = {
   3: [0, 13, 26],
   4: [0, 13, 26, 39],
 };
-const CLASSIC_SAFE = [0, 7, 13, 20, 26, 33, 39, 46];
+const CLASSIC_SAFE = [0, 8, 13, 21, 26, 34, 39, 47];
 
 describe("tables 2 à 4 joueurs : la même croix à quatre bras", () => {
   for (const n of [2, 3, 4]) {
