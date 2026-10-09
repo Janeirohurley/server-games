@@ -74,10 +74,6 @@ export const TURN_DURATION_OPTIONS = [0, 30_000, 60_000, 90_000] as const;
 /** The default when a room is created or a duration is never chosen. */
 export const TURN_DURATION_DEFAULT = 30_000;
 
-/** Color order matches seat order (seat % 4). */
-export const COLORS = ["yellow", "red", "blue", "green"] as const;
-export type LudoColor = (typeof COLORS)[number];
-
 /**
  * The six seats, in turn order. A table of N players uses the FIRST N
  * of these, so a four-player table keeps yellow/red/blue/green exactly

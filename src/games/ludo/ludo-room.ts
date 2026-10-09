@@ -7,14 +7,11 @@ import {
 import { getGameDefinition } from "../registry.js";
 import {
   createTrack,
-  // FINISHED_POSITION,
-  // HOME_COLUMN_START,
   LudoPieceSchema,
   LudoPlayerSchema,
   LudoStateSchema,
   PIECES_PER_PLAYER,
   TURN_DURATION_OPTIONS,
-  ringIndexOf,
   type LudoColor,
   type LudoPlayer,
   type LudoState,
@@ -118,14 +115,10 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       ludoPlayer.sessionId = lobbyPlayer.sessionId;
       ludoPlayer.seat = lobbyPlayer.seat;
       ludoPlayer.connected = lobbyPlayer.connected;
-      // Ajout
       ludoPlayer.avatarUrl = lobbyPlayer.avatarUrl;
       ludoPlayer.voiceMuted = lobbyPlayer.voiceMuted;
       ludoPlayer.adminMuted = lobbyPlayer.adminMuted;
-      //fin ajout
       ludoPlayer.color = track.colorAt(seatIndex);
-      ludoPlayer.avatarUrl = lobbyPlayer.avatarUrl;
-      ludoPlayer.color = COLORS[seatIndex % COLORS.length];
       for (let pieceIndex = 0; pieceIndex < PIECES_PER_PLAYER; pieceIndex++) {
         const piece = new LudoPieceSchema();
         piece.index = pieceIndex;
@@ -145,12 +138,12 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.armTurnTimeout();
   }
 
-/**
-    * Admin starts the match — but never off the cuff: Ludo broadcasts a
-    * full-screen countdown first, and only once it elapses does the match
-    * actually flip to PLAYING (arming the first turn — for the host-set
-    * budget — right when it really starts, so nobody loses a second of it).
-    */
+  /**
+   * Admin starts the match — but never off the cuff: Ludo broadcasts a
+   * full-screen countdown first, and only once it elapses does the match
+   * actually flip to PLAYING (arming the first turn — for the host-set
+   * budget — right when it really starts, so nobody loses a second of it).
+   */
   protected override handleStartGame(client: Client) {
     if (!this.isAdmin(client.sessionId)) return;
     if (!this.canStart()) return;
@@ -278,11 +271,11 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     const piece = player.pieces[pieceIndex];
     if (!piece) return;
 
-       const destination = destinationOf(
-         { index: piece.index, position: piece.position },
-         dice,
-         this.track.finishedPosition,
-       );
+    const destination = destinationOf(
+      { index: piece.index, position: piece.position },
+      dice,
+      this.track.finishedPosition,
+    );
     if (destination === null) return; // illegal — ignored
 
     const allPieces = this.seatedPlayers();
@@ -413,15 +406,6 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.state.diceValue = 0;
     this.state.currentTurn = next?.userId ?? "";
     this.refreshDeadline();
-    //supression de ces lignes
-
-    // this.turnTimeout?.clear();
-    // this.turnTimeout = this.clock.setTimeout(
-    //   () => this.forceSkipTurn(),
-    //   TURN_DURATION_MS,
-    // );
-
-    //fin supression
     this.armTurnTimeout();
   }
 
@@ -438,14 +422,6 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
    * budget (0) there is no deadline — and no ring — at all.
    */
   private refreshDeadline() {
-    this.state.turnDeadline = this.clock.currentTime + TURN_DURATION_MS;
-    //ajout
-    this.turnTimeout?.clear();
-    this.turnTimeout =  this.clock.setTimeout(
-      () => this.forceSkipTurn(),
-      TURN_DURATION_MS,
-    );
-    //fin ajout
     const budget = this.state.turnDurationMs;
     this.state.turnDeadline = budget > 0 ? this.clock.currentTime + budget : 0;
   }
