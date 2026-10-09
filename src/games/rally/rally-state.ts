@@ -46,6 +46,8 @@ export const RallyStateSchema = schema({
   minPlayers: t.uint8(),
   targetPlayers: t.uint8(),
   phase: t.string().default("waiting"),
+  /** Epoch ms (server clock) at match start; 0 while waiting. */
+  startedAt: t.number().default(0),
   hostUserId: t.string().default(""),
   players: t.map(RallyPlayerSchema),
   pendingPlayerRequests: t.map(PendingRequestSchema),

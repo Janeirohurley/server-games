@@ -87,6 +87,12 @@ export const LobbyStateSchema = schema({
   targetPlayers: t.uint8(),
   /** Lifecycle phase — a plain small string, see LIFECYCLE. */
   phase: t.string().default(LIFECYCLE.WAITING),
+  /**
+   * Server wall-clock epoch (ms) captured when the match flips to
+   * PLAYING — lets clients show the game's elapsed time accurately,
+   * even when they join mid-match. 0 while the room is still a lobby.
+   */
+  startedAt: t.number().default(0),
   /** userId of the room admin (starts as the creator, may transfer). */
   hostUserId: t.string().default(""),
   players: t.map(LobbyPlayerSchema),
@@ -163,6 +169,8 @@ export interface LobbyStateLike {
   minPlayers: number;
   targetPlayers: number;
   phase: string;
+  /** Epoch ms (server clock) when the match started; 0 while waiting. */
+  startedAt: number;
   hostUserId: string;
   /**
    * userId of the match winner, set by each game when the match ends.

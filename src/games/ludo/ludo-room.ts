@@ -1,6 +1,9 @@
 import { Client, type Delayed } from "colyseus";
 
-import { BaseGameRoom } from "../../rooms/base-game-room.js";
+import {
+  BaseGameRoom,
+  type LobbySettingsInput,
+} from "../../rooms/base-game-room.js";
 import { getGameDefinition } from "../registry.js";
 import {
   createTrack,
@@ -10,12 +13,15 @@ import {
   LudoPlayerSchema,
   LudoStateSchema,
   PIECES_PER_PLAYER,
+  TURN_DURATION_OPTIONS,
+  ringIndexOf,
   type LudoColor,
   type LudoPlayer,
   type LudoState,
   type LudoTrack,
 } from "./ludo-state.js";
 import type { LobbyPlayerLike } from "../../rooms/schema/lobby-state.js";
+import { LIFECYCLE } from "../../rooms/schema/lobby-state.js";
 import {
   destinationOf,
   grantsExtraTurn,
@@ -26,8 +32,8 @@ import {
   type SeatedPlayer,
 } from "./ludo-rules.js";
 
-/** How long a player has to act before their turn is skipped. */
-const TURN_DURATION_MS = 30_000;
+/** Full-screen "attention à jouer" pause before the match actually starts. */
+const START_COUNTDOWN_SECONDS = 3;
 /** Pause before a forced move plays itself, so the dice can land first. */
 const AUTO_MOVE_DELAY_MS = 900;
 /** Rolls allowed within one extended turn before it is force-passed. */
@@ -54,6 +60,9 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
 
   private turnTimeout?: Delayed;
   private extraRolls = 0;
+  /** True between the host's start request and the actual flip to PLAYING. */
+  private countdownActive = false;
+  private countdownTimer?: Delayed;
 
   /**
    * Board geometry for THIS table, built once from the size the creator
@@ -115,6 +124,8 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       ludoPlayer.adminMuted = lobbyPlayer.adminMuted;
       //fin ajout
       ludoPlayer.color = track.colorAt(seatIndex);
+      ludoPlayer.avatarUrl = lobbyPlayer.avatarUrl;
+      ludoPlayer.color = COLORS[seatIndex % COLORS.length];
       for (let pieceIndex = 0; pieceIndex < PIECES_PER_PLAYER; pieceIndex++) {
         const piece = new LudoPieceSchema();
         piece.index = pieceIndex;
@@ -126,15 +137,41 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
 
     // First player in seat order starts.
     this.state.currentTurn = players[0]?.userId ?? "";
-    this.state.turnDeadline = this.clock.currentTime + TURN_DURATION_MS;
     this.state.diceValue = 0;
     this.state.winnerUserId = "";
     this.extraRolls = 0;
 
-    this.turnTimeout?.clear();
-    this.turnTimeout = this.clock.setTimeout(
-      () => this.forceSkipTurn(),
-      TURN_DURATION_MS,
+    this.refreshDeadline();
+    this.armTurnTimeout();
+  }
+
+/**
+    * Admin starts the match — but never off the cuff: Ludo broadcasts a
+    * full-screen countdown first, and only once it elapses does the match
+    * actually flip to PLAYING (arming the first turn — for the host-set
+    * budget — right when it really starts, so nobody loses a second of it).
+    */
+  protected override handleStartGame(client: Client) {
+    if (!this.isAdmin(client.sessionId)) return;
+    if (!this.canStart()) return;
+    if (this.countdownActive) return; // a start is already scheduled
+
+    this.broadcast("countdown", { seconds: START_COUNTDOWN_SECONDS });
+    this.countdownActive = true;
+    this.countdownTimer = this.clock.setTimeout(
+      () => {
+        this.countdownActive = false;
+        if (
+          this.state.phase !== LIFECYCLE.WAITING &&
+          this.state.phase !== LIFECYCLE.READY
+        ) {
+          return;
+        }
+        this.onBeforeStart();
+        if (!this.startMatch()) return;
+        this.broadcast("gameStarted", {});
+      },
+      START_COUNTDOWN_SECONDS * 1000,
     );
   }
 
@@ -322,7 +359,27 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
 
   public override onDispose() {
     this.turnTimeout?.clear();
+    this.countdownTimer?.clear();
     super.onDispose();
+  }
+
+  /**
+   * Host-editable settings: the per-turn budget. Only ever picked from
+   * TURN_DURATION_OPTIONS (or 0 for unlimited) — a client cannot smuggle
+   * in an arbitrary value. The base room already validated host rights,
+   * the match-not-running gate and `targetPlayers`.
+   */
+  protected override onLobbySettingsApplied(
+    message: LobbySettingsInput | undefined,
+  ) {
+    if (message?.turnDurationMs === undefined) return;
+    const requested = Math.trunc(Number(message.turnDurationMs));
+    if (
+      requested === 0 ||
+      (TURN_DURATION_OPTIONS as readonly number[]).includes(requested)
+    ) {
+      this.state.turnDurationMs = requested;
+    }
   }
 
   // ------------------------------------------------------------------
@@ -365,6 +422,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     // );
 
     //fin supression
+    this.armTurnTimeout();
   }
 
   private forceSkipTurn() {
@@ -375,6 +433,10 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     }
   }
 
+  /**
+   * Expose the current turn's deadline to clients. With an infinite
+   * budget (0) there is no deadline — and no ring — at all.
+   */
   private refreshDeadline() {
     this.state.turnDeadline = this.clock.currentTime + TURN_DURATION_MS;
     //ajout
@@ -384,6 +446,20 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       TURN_DURATION_MS,
     );
     //fin ajout
+    const budget = this.state.turnDurationMs;
+    this.state.turnDeadline = budget > 0 ? this.clock.currentTime + budget : 0;
+  }
+
+  /**
+   * (Re)arm the force-skip timer from the current budget. A 0 budget
+   * means "no time limit": the turn simply waits — nobody is skipped.
+   */
+  private armTurnTimeout() {
+    this.turnTimeout?.clear();
+    const budget = this.state.turnDurationMs;
+    if (budget > 0) {
+      this.turnTimeout = this.clock.setTimeout(() => this.forceSkipTurn(), budget);
+    }
   }
 
   /**

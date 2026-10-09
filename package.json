@@ -13,7 +13,7 @@
     "start:prod": "bun run build/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "loadtest": "tsx loadtest/example.ts --room my_room --numClients 2",
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "bun run clean && tsc -p tsconfig.build.json",
     "clean": "rimraf build",
     "test": "mocha -r tsx -r test/test-server.ts test/**.test.ts --exit --timeout 15000"
   },
@@ -31,9 +31,12 @@
     "typescript": "^5.0.4"
   },
   "dependencies": {
+    "@colyseus/admin": "^0.18.6",
+    "@colyseus/database": "^0.18.4",
     "@colyseus/schema": "^5.0.14",
     "@colyseus/tools": "^0.18.1",
     "colyseus": "^0.18.2",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "postgres": "^3.4.7"
   }
 }

@@ -19,6 +19,42 @@ async function mintToken(userId: string, name: string): Promise<string> {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 50));
 
+/** Collects every broadcast of a message type (no 3s waitForMessage cap). */
+function collect<T>(
+  client: { onMessage: (type: string, handler: (payload: T) => void) => void },
+  type: string,
+): T[] {
+  const received: T[] = [];
+  client.onMessage(type, (payload) => received.push(payload));
+  return received;
+}
+
+/**
+ * Waits until the room really flips to the expected phase. The Ludo start
+ * countdown takes 3 s; waiting on the message directly is too borderline
+ * for the SDK's message subscription, so poll the room state instead.
+ */
+async function awaitPhase(
+  room: { state: { phase: string } },
+  expected: string,
+  tries = 90,
+): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    if (room.state.phase === expected) return;
+    await tick();
+  }
+  throw new Error(`room never reached phase "expected": ${expected}`);
+}
+
+/** Starts as the admin and waits for the 3 s countdown to actually elapse. */
+async function startMatch(
+  admin: { send: (type: string, message?: unknown) => unknown },
+  room: { state: { phase: string } },
+): Promise<void> {
+  admin.send("startGame", {});
+  await awaitPhase(room, "playing");
+}
+
 describe("LudoRoom", () => {
   let colyseus: TestServer;
 
@@ -68,8 +104,8 @@ describe("LudoRoom", () => {
     await tick();
     assert.strictEqual(room.state.phase, "ready");
 
-    clientA.send("startGame", {});
-    await tick();
+    // Host starts: the 3 s countdown elapses, then the match is live.
+    await startMatch(clientA, room);
     assert.strictEqual(room.state.phase, "playing");
     assert.strictEqual(room.state.currentTurn, "user-a");
 
@@ -94,8 +130,7 @@ describe("LudoRoom", () => {
     clientA.send("approveJoin", { userId: "user-b" });
     await tick();
 
-    clientA.send("startGame", {});
-    await tick();
+    await startMatch(clientA, room);
 
     assert.strictEqual(room.state.currentTurn, "user-a");
     assert.strictEqual(room.state.diceValue, 0);
@@ -146,5 +181,140 @@ describe("LudoRoom", () => {
     clientA.send("startGame", {});
     await tick();
     assert.strictEqual(room.state.phase, "waiting");
+  });
+
+  it("broadcasts a 3s countdown before the match actually starts", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const clientA = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const clientB = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    clientA.send("approveJoin", { userId: "user-b" });
+    await tick();
+
+    const countdowns = collect<{ seconds?: number }>(clientA, "countdown");
+    clientA.send("startGame", {});
+
+    // The countdown is broadcast to the whole table while the room is
+    // still "ready" — the match has NOT started yet.
+    await tick();
+    assert.deepStrictEqual(countdowns, [{ seconds: 3 }]);
+    assert.strictEqual(room.state.phase, "ready");
+
+    // Only once the 3 s has elapsed does the match actually start.
+    await awaitPhase(room, "playing");
+    assert.strictEqual(room.state.currentTurn, "user-a");
+  });
+
+  it("ignores a second start request while the countdown is running", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const clientA = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const clientB = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    clientA.send("approveJoin", { userId: "user-b" });
+    await tick();
+
+    const countdowns = collect<{ seconds?: number }>(clientA, "countdown");
+    clientA.send("startGame", {});
+    clientA.send("startGame", {});
+    await awaitPhase(room, "playing");
+
+    // One countdown, one start — the second request is swallowed.
+    assert.deepStrictEqual(countdowns, [{ seconds: 3 }]);
+    assert.strictEqual(room.state.phase, "playing");
+  });
+
+  it("host-edited lobby settings: table size + turn budget, host-only and pre-start", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const host = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const guest = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    host.send("approveJoin", { userId: "user-b" });
+    await tick();
+    assert.strictEqual(room.state.phase, "ready");
+    assert.strictEqual(room.state.turnDurationMs, 30_000); // default
+
+    // A regular player cannot change any setting.
+    guest.send("updateLobbySettings", { targetPlayers: 3 });
+    await tick();
+    assert.strictEqual(room.state.targetPlayers, 2);
+
+    // Shrinking the table below the seated players is refused.
+    host.send("updateLobbySettings", { targetPlayers: 1 });
+    await tick();
+    assert.strictEqual(room.state.targetPlayers, 2);
+
+    // Enlarging flips READY → WAITING: the table is no longer full.
+    host.send("updateLobbySettings", { targetPlayers: 4 });
+    await tick();
+    assert.strictEqual(room.state.targetPlayers, 4);
+    assert.strictEqual(room.state.phase, "waiting");
+
+    // Budget comes from the allowed options only.
+    host.send("updateLobbySettings", { turnDurationMs: 60_000 });
+    await tick();
+    assert.strictEqual(room.state.turnDurationMs, 60_000);
+    host.send("updateLobbySettings", { turnDurationMs: 45_000 }); // unknown
+    await tick();
+    assert.strictEqual(room.state.turnDurationMs, 60_000);
+
+    // Unlimited: budget 0 is a valid option.
+    host.send("updateLobbySettings", { turnDurationMs: 0 });
+    await tick();
+    assert.strictEqual(room.state.turnDurationMs, 0);
+
+    // Back to a full 2-player table.
+    host.send("updateLobbySettings", { targetPlayers: 2 });
+    await tick();
+    assert.strictEqual(room.state.phase, "ready");
+
+    await startMatch(host, room);
+    assert.strictEqual(room.state.phase, "playing");
+    // An infinite budget arms no deadline from the very first turn.
+    assert.strictEqual(room.state.turnDeadline, 0);
+
+    // Settings freeze once the match runs.
+    host.send("updateLobbySettings", { turnDurationMs: 90_000 });
+    await tick();
+    assert.strictEqual(room.state.turnDurationMs, 0);
+  });
+
+  it("arms a turn deadline when a finite budget is configured", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const host = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    host.send("approveJoin", { userId: "user-b" });
+    host.send("updateLobbySettings", { turnDurationMs: 60_000 });
+    await tick();
+
+    await startMatch(host, room);
+    assert.ok(
+      room.state.turnDeadline > 0,
+      "a finite budget exposes the turn deadline",
+    );
+    assert.ok(
+      room.state.turnDeadline > room.state.startedAt,
+      "the deadline lies in the future of the match start",
+    );
   });
 });

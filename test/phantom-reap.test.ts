@@ -117,6 +117,50 @@ describe("phantom reaping after the reconnection grace", () => {
     assert.strictEqual(record.sessionId, bobAgain.sessionId);
   });
 
+  it("a dropped requester's join request dies with the connection — re-requesting starts fresh", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+      reconnectionGrace: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+    assert.ok(
+      room.state.pendingPlayerRequests.has("user-b"),
+      "bob queued as a join request",
+    );
+    const cancelled = collect<{ userId: string }>(alice, "joinRequestCancelled");
+
+    kill(bob);
+    await tick();
+
+    // The request expires the moment its connection dies. It cannot be
+    // left for the late onLeave: a fresh rejoin would have deleted the
+    // old identity (onAuth), so that leave bails before the purge.
+    assert.ok(
+      !room.state.pendingPlayerRequests.has("user-b"),
+      "a departed requester's pending entry must expire",
+    );
+    assert.ok(
+      cancelled.some((m) => m.userId === "user-b"),
+      "everyone was told the request is gone",
+    );
+
+    // Coming back on a fresh connection re-queues a NEW request — a
+    // live entry tied to the new session, never the recycled ghost.
+    const bobAgain = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+    const request = room.state.pendingPlayerRequests.get("user-b");
+    assert.ok(request, "re-request after expiry starts fresh");
+    void bobAgain;
+  });
+
   it("frees a dropped spectator slot too", async () => {
     const { room, alice } = await seatedRoom();
     const spectatorLeft = collect<{ userId: string }>(
@@ -148,8 +192,12 @@ describe("phantom reaping after the reconnection grace", () => {
   it("keeps a LIVE match's seat — the outcome depends on it", async () => {
     const { room, alice, bob } = await seatedRoom();
 
+    // Ludo waits through its 3 s countdown before the match is live; poll
+    // until it really flips (beat the SDK's over-optimistic tick()).
     alice.send("startGame", {});
-    await tick();
+    for (let i = 0; i < 60 && room.state.phase !== "playing"; i++) {
+      await tick();
+    }
     assert.strictEqual(room.state.phase, "playing");
 
     kill(bob);

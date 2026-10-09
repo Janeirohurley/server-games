@@ -54,6 +54,17 @@ export type DepartureKind =
   | "evicted";    // server-side removal (kick/room close)
 
 /**
+ * Host-editable lobby settings. The room applies whatever it knows
+ * (`targetPlayers` here); games plug their own knobs (Ludo's turn
+ * budget) through `onLobbySettingsApplied`. Fields are optional so a
+ * client can tweak a single value in one round-trip.
+ */
+export interface LobbySettingsInput {
+  targetPlayers?: number;
+  turnDurationMs?: number;
+}
+
+/**
  * Generic base room for every game on the platform.
  *
  * Owns the parts that have nothing to do with any specific game:
@@ -371,6 +382,8 @@ export abstract class BaseGameRoom<
       rejectJoin: (client: Client, message: { userId?: string }) =>
         this.handleRejectJoin(client, message),
       closeRoom: (client: Client) => this.handleCloseRoom(client),
+      updateLobbySettings: (client: Client, message: unknown) =>
+        this.handleLobbySettings(client, message),
 
       // Deliberate leave via UI (section 10) — after double confirmation
       // client-side, so the server treats it as final.
@@ -523,6 +536,48 @@ export abstract class BaseGameRoom<
     client.leave(CloseCode.CONSENTED);
   }
 
+  /**
+   * Host-only lobby settings (table size + game knobs through the hook).
+   * Only applies while the lobby waits: once the match runs the settings
+   * are frozen — gameplay must never shift under the players' feet.
+   */
+  protected handleLobbySettings(
+    client: Client,
+    message: LobbySettingsInput | undefined,
+  ) {
+    if (!this.isAdmin(client.sessionId)) return;
+    if (this.started || this.closed) return;
+    if (
+      this.state.phase !== LIFECYCLE.WAITING &&
+      this.state.phase !== LIFECYCLE.READY
+    ) {
+      return;
+    }
+
+    if (message?.targetPlayers !== undefined) {
+      const requested = Math.trunc(Number(message.targetPlayers));
+      const allowed = this.game.allowedPlayerCounts;
+      const valid =
+        requested > 0 &&
+        requested <= this.state.maxPlayers &&
+        requested >= this.state.players.size && // never shrink below seated
+        (!allowed || allowed.includes(requested));
+      if (valid) this.state.targetPlayers = requested;
+    }
+
+    // Game-specific knobs (Ludo's turn budget, future rule toggles).
+    this.onLobbySettingsApplied(message);
+
+    // Enlarging/shrinking the table may flip WAITING ⇄ READY.
+    this.refreshReadiness();
+  }
+
+  /**
+   * Hook for game subclasses to apply their own host-editable settings.
+   * Receives the raw message (undefined-safe), defaults to a no-op.
+   */
+  protected onLobbySettingsApplied(_message: LobbySettingsInput | undefined) {}
+
   /** A user asks for a player seat — lands in the approval queue. */
   private handleJoinRequest(client: Client) {
     const identity = this.identities.get(client.sessionId);
@@ -534,7 +589,11 @@ export abstract class BaseGameRoom<
     }
 
     if (this.state.players.get(identity.userId)) return; // already seated
-    if (this.state.pendingPlayerRequests.get(identity.userId)) return;
+    // No pending-swallow here: asking again REFRESHES the request
+    // (fresh timestamp + joinRequested) instead of recycling a stale
+    // notification — that is exactly what "il refait la demande" must
+    // produce. Duplicate requests are harmless: one map entry keyed by
+    // userId, always pointing at the newest ask.
     if (this.closed || this.started) {
       client.send("joinRequestRejected", { reason: "room-unavailable" });
       return;
@@ -673,7 +732,7 @@ export abstract class BaseGameRoom<
   }
 
   /** Is this session the room admin (or the admin's live session)? */
-  private isAdmin(sessionId: string): boolean {
+  protected isAdmin(sessionId: string): boolean {
     const identity = this.identities.get(sessionId);
     if (!identity) return false;
     // The admin acts through any of their live sessions; approval state
@@ -737,6 +796,9 @@ export abstract class BaseGameRoom<
     this.started = true;
     this.state.phase = LIFECYCLE.PLAYING;
     this.matchStartedAt = Date.now();
+    // Expose to clients: their elapsed-time dial stays exact even for
+    // spectators who join mid-match (server clock, not receiver clock).
+    this.state.startedAt = Date.now();
     this.refreshMetadata();
     return true;
   }
@@ -943,15 +1005,15 @@ export abstract class BaseGameRoom<
       return;
     }
 
-    // A pending requester whose connection ended for good: queue entry
-    // goes too — a request nobody can reach is worthless. They can
-    // re-request. The session check keeps a requester who already
-    // rejoined through a new connection from losing their queued spot
-    // when the OLD session's grace expires.
-    if (
-      this.state.pendingPlayerRequests.get(userId) &&
-      this.sessionIdOfUser(userId) === undefined
-    ) {
+    // A pending requester whose connection ended for good (consented
+    // leave, or a drop whose reconnection window just expired): the
+    // queue entry goes too — a request nobody can reach is worthless,
+    // and a stale one must never survive a later re-request. Purged
+    // unconditionally: the OLD session's final leave must also clear
+    // the request when the user already moved to a fresh connection
+    // mid-grace (that fresh join refreshed the entry, so without this
+    // purge the admin would see a ghost that no leave ever removed).
+    if (this.state.pendingPlayerRequests.get(userId)) {
       this.state.pendingPlayerRequests.delete(userId);
       this.broadcast("joinRequestCancelled", { userId });
     }
@@ -991,6 +1053,18 @@ export abstract class BaseGameRoom<
         spectator.sessionId = "";
         // Held for the same grace, then reaped (see schedulePhantomReap).
         this.schedulePhantomReap(userId);
+      }
+
+      // A pending requester's connection died with the request — purge
+      // it HERE, not in onLeave. A fresh page load re-authenticates and
+      // DELETES the old identity in onAuth, so the old session's late
+      // onLeave bails out before handleDeparture ever runs and nothing
+      // would expire the stale entry; every later re-request would see
+      // the same recycled notification. The queue is for people who can
+      // be reached for approval.
+      if (this.state.pendingPlayerRequests.get(userId)) {
+        this.state.pendingPlayerRequests.delete(userId);
+        this.broadcast("joinRequestCancelled", { userId });
       }
     }
   }
