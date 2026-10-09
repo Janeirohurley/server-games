@@ -6,9 +6,9 @@ import {
 } from "../../rooms/base-game-room.js";
 import { getGameDefinition } from "../registry.js";
 import {
-  COLORS,
-  FINISHED_POSITION,
-  HOME_COLUMN_START,
+  createTrack,
+  // FINISHED_POSITION,
+  // HOME_COLUMN_START,
   LudoPieceSchema,
   LudoPlayerSchema,
   LudoStateSchema,
@@ -18,6 +18,7 @@ import {
   type LudoColor,
   type LudoPlayer,
   type LudoState,
+  type LudoTrack,
 } from "./ludo-state.js";
 import type { LobbyPlayerLike } from "../../rooms/schema/lobby-state.js";
 import { LIFECYCLE } from "../../rooms/schema/lobby-state.js";
@@ -28,6 +29,7 @@ import {
   legalMoves,
   resolveCaptures,
   type RulePiece,
+  type SeatedPlayer,
 } from "./ludo-rules.js";
 
 /** Full-screen "attention à jouer" pause before the match actually starts. */
@@ -62,6 +64,21 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
   private countdownActive = false;
   private countdownTimer?: Delayed;
 
+  /**
+   * Board geometry for THIS table, built once from the size the creator
+   * picked. Cached on first use so the board can never re-space itself
+   * mid-match: a player who has learned where the orange start sits must
+   * not find it moved when the second seat joins.
+   */
+  private trackCache?: LudoTrack;
+
+  private get track(): LudoTrack {
+    if (!this.trackCache) {
+      this.trackCache = createTrack(this.state.targetPlayers);
+    }
+    return this.trackCache;
+  }
+
   constructor() {
     super();
     // Register lifecycle + game messages. (Instance field initializers
@@ -82,6 +99,13 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
   }
 
   protected override onBeforeStart() {
+    /*
+     * Freeze the board geometry BEFORE handing out colors, so seat 0
+     * always gets the first color of a table of exactly `targetPlayers`
+     * players — a 3-player table never hands out green.
+     */
+    const track = this.track;
+
     // Assign deterministic colors and seats from lobby join order.
     const players = [...this.state.players.values()].sort(
       (a, b) => a.seat - b.seat,
@@ -94,6 +118,12 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       ludoPlayer.sessionId = lobbyPlayer.sessionId;
       ludoPlayer.seat = lobbyPlayer.seat;
       ludoPlayer.connected = lobbyPlayer.connected;
+      // Ajout
+      ludoPlayer.avatarUrl = lobbyPlayer.avatarUrl;
+      ludoPlayer.voiceMuted = lobbyPlayer.voiceMuted;
+      ludoPlayer.adminMuted = lobbyPlayer.adminMuted;
+      //fin ajout
+      ludoPlayer.color = track.colorAt(seatIndex);
       ludoPlayer.avatarUrl = lobbyPlayer.avatarUrl;
       ludoPlayer.color = COLORS[seatIndex % COLORS.length];
       for (let pieceIndex = 0; pieceIndex < PIECES_PER_PLAYER; pieceIndex++) {
@@ -156,6 +186,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.refreshDeadline();
 
     const moves = legalMoves(
+      this.track,
       player.color as LudoColor,
       snapshotPieces(player),
       value,
@@ -247,33 +278,38 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     const piece = player.pieces[pieceIndex];
     if (!piece) return;
 
-    const fromPosition = piece.position;
-    const destination = destinationOf(
-      { index: piece.index, position: piece.position },
-      dice,
-    );
+       const destination = destinationOf(
+         { index: piece.index, position: piece.position },
+         dice,
+         this.track.finishedPosition,
+       );
     if (destination === null) return; // illegal — ignored
 
-    const allPieces = this.snapshotAllPieces();
-    const captures = resolveCaptures(color, destination, allPieces);
+    const allPieces = this.seatedPlayers();
+    const captures = resolveCaptures(
+      this.track,
+      color,
+      destination,
+      allPieces,
+    );
 
     // Move the piece.
     piece.position = destination;
-    if (destination === FINISHED_POSITION) {
+    if (destination === this.track.finishedPosition) {
       player.finished = player.finished + 1;
     }
 
     // Send captured opponents back to base (never from safe cells).
     if (captures.length > 0) {
-      const destinationRing = ringIndexOf(color, destination);
+      const destinationRing = this.track.ringIndexOf(color, destination);
       for (const other of this.state.players.values()) {
         if (other.userId === player.userId) continue;
         const otherColor = other.color as LudoColor;
         for (const opponentPiece of other.pieces) {
           if (
             opponentPiece.position >= 0 &&
-            opponentPiece.position < HOME_COLUMN_START &&
-            ringIndexOf(otherColor, opponentPiece.position) === destinationRing
+            opponentPiece.position < this.track.homeColumnStart &&
+            this.track.ringIndexOf(otherColor, opponentPiece.position) === destinationRing
           ) {
             opponentPiece.position = -1;
             this.broadcast("pieceCaptured", {
@@ -289,12 +325,12 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.broadcast("pieceMoved", {
       userId: player.userId,
       pieceIndex,
-      from: fromPosition,
+      // from: fromPosition,
       to: destination,
     });
 
     // Victory check.
-    if (hasWon(snapshotPieces(player))) {
+    if (hasWon(snapshotPieces(player), this.track.finishedPosition)) {
       this.state.winnerUserId = player.userId;
       this.finishMatch();
       this.turnTimeout?.clear();
@@ -303,7 +339,10 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     }
 
     // Extra turn (6, capture, finish) or pass.
-    const move = { captures, finishes: destination === FINISHED_POSITION };
+    const move = {
+      captures,
+      finishes: destination === this.track.finishedPosition,
+    };
     if (grantsExtraTurn(dice, move)) {
       this.extraRolls += 1;
       if (this.extraRolls >= MAX_EXTRA_ROLLS) {
@@ -374,6 +413,15 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.state.diceValue = 0;
     this.state.currentTurn = next?.userId ?? "";
     this.refreshDeadline();
+    //supression de ces lignes
+
+    // this.turnTimeout?.clear();
+    // this.turnTimeout = this.clock.setTimeout(
+    //   () => this.forceSkipTurn(),
+    //   TURN_DURATION_MS,
+    // );
+
+    //fin supression
     this.armTurnTimeout();
   }
 
@@ -390,6 +438,14 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
    * budget (0) there is no deadline — and no ring — at all.
    */
   private refreshDeadline() {
+    this.state.turnDeadline = this.clock.currentTime + TURN_DURATION_MS;
+    //ajout
+    this.turnTimeout?.clear();
+    this.turnTimeout =  this.clock.setTimeout(
+      () => this.forceSkipTurn(),
+      TURN_DURATION_MS,
+    );
+    //fin ajout
     const budget = this.state.turnDurationMs;
     this.state.turnDeadline = budget > 0 ? this.clock.currentTime + budget : 0;
   }
@@ -406,20 +462,21 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     }
   }
 
-  private snapshotAllPieces(): Record<LudoColor, RulePiece[]> {
-    const snapshot = {} as Record<LudoColor, RulePiece[]>;
-    for (const color of COLORS) snapshot[color] = [];
-    for (const player of this.state.players.values()) {
-      const color = player.color as LudoColor;
-      if (!snapshot[color]) continue;
-      snapshot[color].push(
-        ...player.pieces.map((piece) => ({
-          index: piece.index,
-          position: piece.position,
-        })),
-      );
-    }
-    return snapshot;
+  /**
+   * Every seated player's pieces, for capture resolution.
+   *
+   * A list rather than a record keyed by color: the set of colors in
+   * play depends on the table size, so a fixed record would have to be
+   * pre-seeded with seats nobody occupies.
+   */
+  private seatedPlayers(): SeatedPlayer[] {
+    return [...this.state.players.values()].map((player) => ({
+      color: player.color as LudoColor,
+      pieces: player.pieces.map((piece) => ({
+        index: piece.index,
+        position: piece.position,
+      })),
+    }));
   }
 }
 

@@ -5,22 +5,30 @@
  * no clocks. The room validates client intents through these before
  * mutating the synchronized state. Kept dependency-free so it can be
  * unit-tested directly and later shared with the platform if needed.
+ *
+ * Anything that depends on WHERE a player enters the ring takes the
+ * table's `LudoTrack` as its first argument. The track is a per-table
+ * value, never module state, so two tables of different sizes can be
+ * simulated side by side without interfering.
  */
 
 import {
-  COLORS,
   FINISHED_POSITION,
-  HOME_COLUMN_START,
   PIECES_PER_PLAYER,
-  isSafeRingCell,
-  ringIndexOf,
   type LudoColor,
+  type LudoTrack,
 } from "./ludo-state.js";
 
 /** Minimal piece snapshot the rules operate on. */
 export interface RulePiece {
   index: number;
   position: number;
+}
+
+/** A seated player's pieces, for capture resolution. */
+export interface SeatedPlayer {
+  color: LudoColor;
+  pieces: readonly RulePiece[];
 }
 
 /** A validated move the room may apply to its state. */
@@ -39,10 +47,14 @@ export interface ResolvedMove {
 /**
  * Compute the destination path index for a piece, or null when the move
  * is illegal (needs a 6 to leave base, or would overshoot the finish).
+ *
+ * Pure arithmetic on the piece's own path: independent of the table, so
+ * it needs no track.
  */
 export function destinationOf(
   piece: RulePiece,
   dice: number,
+  finishedPosition: number = FINISHED_POSITION,
 ): number | null {
   if (dice < 1 || dice > 6) return null;
 
@@ -50,32 +62,33 @@ export function destinationOf(
     // Only a 6 brings a piece out of base, landing on path index 0.
     return dice === 6 ? 0 : null;
   }
-  if (piece.position === FINISHED_POSITION) return null;
+  if (piece.position === finishedPosition) return null;
 
   const target = piece.position + dice;
-  if (target > FINISHED_POSITION) return null; // exact count required
+  if (target > finishedPosition) return null; // exact count required
   return target;
 }
 
 /** All legal moves for a player given their color, pieces and dice roll. */
 export function legalMoves(
+  track: LudoTrack,
   color: LudoColor,
   pieces: readonly RulePiece[],
   dice: number,
 ): ResolvedMove[] {
   const moves: ResolvedMove[] = [];
   for (const piece of pieces) {
-    if (piece.position === FINISHED_POSITION) continue;
-    const destination = destinationOf(piece, dice);
+    if (piece.position === track.finishedPosition) continue;
+    const destination = destinationOf(piece, dice, track.finishedPosition);
     if (destination === null) continue;
     moves.push({
       pieceIndex: piece.index,
       fromPosition: piece.position,
       toPosition: destination,
       destinationRing:
-        destination < HOME_COLUMN_START ? ringIndexOf(color, destination) : -1,
+        destination < track.homeColumnStart ? track.ringIndexOf(color, destination) : -1,
       captures: [],
-      finishes: destination === FINISHED_POSITION,
+      finishes: destination === track.finishedPosition,
     });
   }
   return moves;
@@ -83,27 +96,32 @@ export function legalMoves(
 
 /**
  * Resolve captures for a move landing on the shared ring.
- * `allPieces` maps color → that player's pieces (any state).
  *
- * Pieces entering their home column (path index ≥ 51) or finishing can
- * never capture; pieces on safe ring cells can never be captured.
+ * Pieces entering their home column (path index >= track.homeColumnStart)
+ * or finishing can never capture; pieces on safe ring cells can never be
+ * captured.
+ *
+ * Two pieces only share a ring cell when their PATHS meet there: the
+ * mover's own home column is private, and so is each opponent's, so the
+ * comparison is done on ring indexes, never on path indexes.
  */
 export function resolveCaptures(
+  track: LudoTrack,
   moverColor: LudoColor,
   destination: number,
-  allPieces: Readonly<Record<LudoColor, readonly RulePiece[]>>,
+  opponents: readonly SeatedPlayer[],
 ): number[] {
-  if (destination < 0 || destination >= HOME_COLUMN_START) return [];
+  if (destination < 0 || destination >= track.homeColumnStart) return [];
 
-  const ringIndex = ringIndexOf(moverColor, destination);
-  if (isSafeRingCell(ringIndex)) return [];
+  const ringIndex = track.ringIndexOf(moverColor, destination);
+  if (track.isSafeCell(ringIndex)) return [];
 
   const captured: number[] = [];
-  for (const color of COLORS) {
-    if (color === moverColor) continue;
-    for (const piece of allPieces[color]) {
-      if (piece.position < 0 || piece.position >= HOME_COLUMN_START) continue;
-      if (ringIndexOf(color, piece.position) === ringIndex) {
+  for (const opponent of opponents) {
+    if (opponent.color === moverColor) continue;
+    for (const piece of opponent.pieces) {
+      if (piece.position < 0 || piece.position >= track.homeColumnStart) continue;
+      if (track.ringIndexOf(opponent.color, piece.position) === ringIndex) {
         captured.push(piece.index);
       }
     }
@@ -137,9 +155,12 @@ export function nextTurnUserId(
 }
 
 /** A player wins when every piece is home. */
-export function hasWon(pieces: readonly RulePiece[]): boolean {
+export function hasWon(
+  pieces: readonly RulePiece[],
+  finishedPosition: number = FINISHED_POSITION,
+): boolean {
   return (
     pieces.length === PIECES_PER_PLAYER &&
-    pieces.every((piece) => piece.position === FINISHED_POSITION)
+    pieces.every((piece) => piece.position === finishedPosition)
   );
 }

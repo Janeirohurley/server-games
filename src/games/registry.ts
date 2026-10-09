@@ -33,8 +33,12 @@ export const GAMES: readonly GameDefinition[] = [
     id: "ludo",
     name: "Ludo",
     minPlayers: 2,
-    maxPlayers: 4,
-    allowedPlayerCounts: [2, 3, 4],
+    // Six seats is the size of the colour palette in `ludo-state.ts`
+    // (LUDO_PALETTE). Raising it past six would hand two players the
+    // same colour, which would make their paths identical and captures
+    // between them undecidable.
+    maxPlayers: 6,
+    allowedPlayerCounts: [2, 3, 4, 5, 6],
   },
   {
     id: "checkers",
