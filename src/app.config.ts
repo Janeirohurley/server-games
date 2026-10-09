@@ -18,6 +18,27 @@ import { CheckersRoom } from "./games/checkers/checkers-room.js";
 import { RallyRoom } from "./games/rally/rally-room.js";
 import { LIFECYCLE } from "./rooms/schema/lobby-state.js";
 import { getRealtimeTokenSecret } from "./auth/verify-token.js";
+import { admin } from "@colyseus/admin";
+import { createAdminDatabase } from "./admin/database.js";
+
+/**
+ * Operator panel, served at `/admin` with its REST API at `/admin-api`.
+ *
+ * Booted before `defineServer` on purpose: `admin()` reads the database's
+ * table registry at construction time, so it has to run after
+ * `GameDatabase.boot()` rather than during `listen()`. Top-level await is
+ * what makes that ordering expressible — `index.ts` cannot observe this
+ * module until the boot settles.
+ *
+ * `createAdminDatabase` returns undefined without a database, in which case
+ * the panel is simply not mounted: a missing DATABASE_URL must degrade
+ * operator tooling, never the rooms, the matchmaker or the transport.
+ *
+ * Mounted on the express app rather than spread into `createRouter` — see
+ * the note at the mount site below for why that detail is load-bearing.
+ */
+const adminDatabase = await createAdminDatabase();
+const adminPanel = adminDatabase ? admin({ database: adminDatabase }) : undefined;
 
 const server = defineServer({
 
@@ -302,6 +323,21 @@ const server = defineServer({
     app.get("/hi", (req, res) => {
       res.send("It's time to kick ass and chew bubblegum!");
     });
+
+    /**
+     * @colyseus/admin, mounted ahead of the dev-only middleware below.
+     *
+     * Order matters: the playground is mounted on "/" further down and, being
+     * a catch-all, would swallow "/admin/*" if it were registered first.
+     *
+     * Express rather than `createRouter` because the router only registers
+     * "/admin/" plus an "/admin/**" catch-all, while the express build
+     * additionally 302s the bare "/admin" onto the canonical "/admin/".
+     * Registering it here is what makes the documented entry point resolve.
+     */
+    if (adminPanel) {
+      app.use(adminPanel);
+    }
 
     /**
      * Use @colyseus/monitor
