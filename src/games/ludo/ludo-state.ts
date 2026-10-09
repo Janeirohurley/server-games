@@ -30,6 +30,14 @@ export const RING_LENGTH = 52;
 export const HOME_COLUMN_START = 51;
 export const FINISHED_POSITION = 57;
 
+/**
+ * Per-turn budgets the host may pick (ms). 0 = no time limit. Mirror on
+ * the platform client (`LUDO_TURN_DURATION_OPTIONS`).
+ */
+export const TURN_DURATION_OPTIONS = [0, 30_000, 60_000, 90_000] as const;
+/** The default when a room is created or a duration is never chosen. */
+export const TURN_DURATION_DEFAULT = 30_000;
+
 /** Color order matches seat order (seat % 4). */
 export const COLORS = ["yellow", "red", "blue", "green"] as const;
 export type LudoColor = (typeof COLORS)[number];
@@ -101,6 +109,8 @@ export const LudoStateSchema = schema({
   minPlayers: t.uint8(),
   targetPlayers: t.uint8(),
   phase: t.string().default("waiting"),
+  /** Epoch ms (server clock) at match start; 0 while waiting. */
+  startedAt: t.number().default(0),
   hostUserId: t.string().default(""),
   players: t.map(LudoPlayerSchema),
   pendingPlayerRequests: t.map(PendingRequestSchema),
@@ -111,6 +121,8 @@ export const LudoStateSchema = schema({
   currentTurn: t.string().default(""),
   /** Room-clock time (ms) the current turn expires — clients render the countdown. */
   turnDeadline: t.number().default(0),
+  /** Per-turn budget (ms) chosen by the host; 0 = no time limit. */
+  turnDurationMs: t.uint32().default(TURN_DURATION_DEFAULT),
   /** Last dice value rolled; 0 when no roll is pending. */
   diceValue: t.uint8().default(0),
   /** Set once a player has all four pieces home. */
