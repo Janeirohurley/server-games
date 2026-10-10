@@ -2,6 +2,13 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.2] - 2026-10-10
+
+### Fixed
+
+* Persisted new and changed join-request state before acknowledging a durable
+  registration, with an explicit failure event when persistence is unavailable.
+
 ## [0.4.1] - 2026-10-10
 
 ### Fixed

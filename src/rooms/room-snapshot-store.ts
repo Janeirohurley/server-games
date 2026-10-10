@@ -68,8 +68,11 @@ class RoomSnapshotStore {
     }
   }
 
-  async save(snapshot: PersistedRoomSnapshot) {
-    if (!(await this.init()) || !this.sql) return;
+  async save(snapshot: PersistedRoomSnapshot): Promise<boolean> {
+    // Memory-only mode is an intentional development/degraded mode; there
+    // is no durable write to wait for in that case.
+    if (!this.enabled) return true;
+    if (!(await this.init()) || !this.sql) return false;
     try {
       await this.sql`
         INSERT INTO ${this.sql(TABLE)} (room_id, room_name, options, state, saved_at)
@@ -86,8 +89,10 @@ class RoomSnapshotStore {
           state = EXCLUDED.state,
           saved_at = EXCLUDED.saved_at
       `;
+      return true;
     } catch (error) {
       console.warn("[realtime] room snapshot save failed:", error);
+      return false;
     }
   }
 

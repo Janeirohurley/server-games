@@ -7,6 +7,11 @@ Each request has a stable `requestId`. The server stores one pending request per
 `userId`, acknowledges registration with `joinRequestRegistered`, and records
 terminal outcomes in `joinRequestResults`.
 
+When lobby persistence is enabled, `joinRequestRegistered` is sent only after
+the current lobby snapshot has been written successfully. A persistence error
+produces `joinRequestRegistrationFailed` so the client can retry without
+claiming that the request was accepted.
+
 The lifecycle is `pending → accepted | rejected | cancelled | expired`.
 Retries reuse the same identifier and return the existing registration instead of
 creating duplicates. Only the authenticated host can approve or reject a request,

@@ -322,7 +322,7 @@ export abstract class BaseGameRoom<
       throw new ServerError(4_011, "Room is full — join as spectator");
     }
 
-    this.enqueueJoinRequest(identity);
+    await this.enqueueJoinRequest(identity);
     this.sendChatSnapshot(client);
     // The requester keeps their connection open and watches read-only
     // until an admin approves or rejects (client renders the pending
@@ -625,7 +625,10 @@ export abstract class BaseGameRoom<
   protected onLobbySettingsApplied(_message: LobbySettingsInput | undefined) {}
 
   /** A user asks for a player seat — lands in the approval queue. */
-  private handleJoinRequest(client: Client, message: { requestId?: string } = {}) {
+  private async handleJoinRequest(
+    client: Client,
+    message: { requestId?: string } = {},
+  ) {
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     // Guests are spectators by nature — the seat queue is not for them.
@@ -639,7 +642,7 @@ export abstract class BaseGameRoom<
     // was created; retries must never turn a known request into a false
     // room-full error.
     if (this.state.pendingPlayerRequests.get(identity.userId)) {
-      this.enqueueJoinRequest(identity, message.requestId);
+      await this.enqueueJoinRequest(identity, message.requestId);
       return;
     }
     // No pending-swallow here: asking again REFRESHES the request
@@ -656,7 +659,7 @@ export abstract class BaseGameRoom<
       return;
     }
 
-    this.enqueueJoinRequest(identity, message.requestId);
+    await this.enqueueJoinRequest(identity, message.requestId);
   }
 
   /** A requester withdraws their own pending request. */
@@ -672,6 +675,7 @@ export abstract class BaseGameRoom<
       userId: identity.userId,
       requestId: request.requestId,
     });
+    this.refreshMetadata();
   }
 
   /** Admin accepts a pending requester — all four checks of section 6. */
@@ -721,6 +725,7 @@ export abstract class BaseGameRoom<
         name: request.name,
         players: this.state.players.size,
       });
+      this.refreshMetadata();
       return;
     }
 
@@ -753,6 +758,7 @@ export abstract class BaseGameRoom<
       name: request.name,
       reason: "declined",
     });
+    this.refreshMetadata();
   }
 
   /** Admin closes the room — terminal, section 12. */
@@ -963,10 +969,18 @@ export abstract class BaseGameRoom<
   // ------------------------------------------------------------------
 
   /** Queue a user as a pending player request and tell the room. */
-  private enqueueJoinRequest(identity: RealtimeIdentity, requestedId?: string) {
+  private async enqueueJoinRequest(
+    identity: RealtimeIdentity,
+    requestedId?: string,
+  ) {
     const existing = this.state.pendingPlayerRequests.get(identity.userId);
     if (existing) {
-      this.sendJoinRequestAck(identity.userId, existing);
+      const durable = await this.persistLobbySnapshot();
+      if (durable) {
+        this.sendJoinRequestAck(identity.userId, existing);
+      } else {
+        this.sendJoinRequestFailure(identity.userId);
+      }
       return;
     }
 
@@ -981,6 +995,11 @@ export abstract class BaseGameRoom<
       Math.min(this.clock.currentTime, 4_294_967_295),
     );
     this.state.pendingPlayerRequests.set(identity.userId, request);
+    this.refreshMetadata(false);
+    if (!(await this.persistLobbySnapshot())) {
+      this.sendJoinRequestFailure(identity.userId);
+      return;
+    }
     this.sendJoinRequestAck(identity.userId, request);
     this.logJoinRequest("registered", request.requestId, request.userId);
     this.broadcast("joinRequested", {
@@ -998,6 +1017,16 @@ export abstract class BaseGameRoom<
       requestId: request.requestId,
       status: "pending",
       requestedAt: request.requestedAt,
+    });
+  }
+
+  private sendJoinRequestFailure(userId: string) {
+    const sessionId = this.sessionIdOfUser(userId);
+    const client = sessionId
+      ? this.clients.find((item) => item.sessionId === sessionId)
+      : undefined;
+    client?.send("joinRequestRegistrationFailed", {
+      reason: "persistence-unavailable",
     });
   }
 
@@ -1030,10 +1059,12 @@ export abstract class BaseGameRoom<
   private expirePendingJoinRequests() {
     if (this.closed || this.started) return;
     const now = this.clock.currentTime;
+    let changed = false;
     for (const request of [...this.state.pendingPlayerRequests.values()]) {
       if (now - request.requestedAt < JOIN_REQUEST_TTL_MS) continue;
       this.state.pendingPlayerRequests.delete(request.userId);
       this.recordJoinRequestResult(request, "expired", "request-timeout");
+      changed = true;
       this.broadcast("joinRequestExpired", {
         userId: request.userId,
         requestId: request.requestId,
@@ -1056,6 +1087,7 @@ export abstract class BaseGameRoom<
       result.status = "expired";
       result.reason = "approval-timeout";
       result.updatedAt = Math.min(now, 4_294_967_295);
+      changed = true;
       this.logJoinRequest("expired", result.requestId, result.userId, result.reason);
       this.broadcast("joinRequestExpired", {
         userId: result.userId,
@@ -1063,6 +1095,7 @@ export abstract class BaseGameRoom<
         reason: result.reason,
       });
     }
+    if (changed) this.refreshMetadata();
   }
 
   private logJoinRequest(
@@ -1326,7 +1359,7 @@ export abstract class BaseGameRoom<
    * ("● En ligne", "🎮 En train de jouer"). Ids only: no names, no
    * profile data — the profile stays the platform's business.
    */
-  private refreshMetadata() {
+  private refreshMetadata(persist = true) {
     this.setMetadata({
       gameId: this.state.gameId,
       gameName: this.state.gameName,
@@ -1339,11 +1372,15 @@ export abstract class BaseGameRoom<
       spectatorIds: [...this.state.spectators.values()].map((s) => s.userId),
     });
 
+    if (persist) void this.persistLobbySnapshot();
+  }
+
+  private persistLobbySnapshot(): Promise<boolean> {
     if (
       this.state.phase === LIFECYCLE.WAITING ||
       this.state.phase === LIFECYCLE.READY
     ) {
-      void roomSnapshotStore.save({
+      return roomSnapshotStore.save({
         roomId: this.roomId,
         roomName: this.roomName,
         options: {
@@ -1354,9 +1391,8 @@ export abstract class BaseGameRoom<
         state: (this.state as unknown as { toJSON(): Record<string, unknown> }).toJSON(),
         savedAt: Date.now(),
       });
-    } else {
-      void roomSnapshotStore.remove(this.roomId);
     }
+    return roomSnapshotStore.remove(this.roomId).then(() => true);
   }
 
   /**
