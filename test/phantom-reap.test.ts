@@ -273,6 +273,70 @@ describe("phantom reaping after the reconnection grace", () => {
     );
   });
 
+  it("rehydrates lobby players and join-request state from a restart snapshot", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+      restoreState: {
+        targetPlayers: 2,
+        phase: "waiting",
+        startedAt: 0,
+        hostUserId: "user-a",
+        turnDurationMs: 60_000,
+        players: {
+          "user-a": {
+            userId: "user-a",
+            name: "Alice",
+            seat: 0,
+            voiceMuted: true,
+            adminMuted: false,
+          },
+        },
+        pendingPlayerRequests: {
+          "user-b": {
+            requestId: "restored-request-001",
+            userId: "user-b",
+            name: "Bob",
+            requestedAt: 123,
+          },
+        },
+        joinRequestResults: {
+          "old-request-001": {
+            requestId: "old-request-001",
+            userId: "user-c",
+            status: "rejected",
+            updatedAt: 456,
+            reason: "host-rejected",
+          },
+        },
+        spectators: {
+          "user-spectator": {
+            userId: "user-spectator",
+            name: "Spectator",
+            sessionId: "old-session",
+          },
+        },
+      },
+    })) as LudoRoom;
+
+    assert.strictEqual(room.state.hostUserId, "user-a");
+    assert.strictEqual(room.state.players.get("user-a")?.connected, false);
+    assert.strictEqual(room.state.players.get("user-a")?.sessionId, "");
+    assert.strictEqual(
+      room.state.pendingPlayerRequests.get("user-b")?.requestId,
+      "restored-request-001",
+    );
+    assert.strictEqual(
+      room.state.joinRequestResults.get("old-request-001")?.status,
+      "rejected",
+    );
+    assert.strictEqual(
+      room.state.spectators.size,
+      0,
+      "old spectator transports are not restored",
+    );
+    assert.strictEqual(room.state.turnDurationMs, 60_000);
+  });
+
   it("frees a dropped spectator slot too", async () => {
     const { room, alice } = await seatedRoom();
     const spectatorLeft = collect<{ userId: string }>(

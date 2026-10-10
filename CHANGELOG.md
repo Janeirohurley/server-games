@@ -2,6 +2,14 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.1] - 2026-10-10
+
+### Fixed
+
+* Rehydrated persisted lobby players, pending requests and terminal outcomes
+  into typed Colyseus schemas after a process restart.
+* Added regression coverage for restart snapshot recovery.
+
 ## [0.4.0] - 2026-10-10
 
 ### Added

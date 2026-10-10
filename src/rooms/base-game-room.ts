@@ -160,24 +160,7 @@ export abstract class BaseGameRoom<
     this.state.minPlayers = def.minPlayers;
     this.state.phase = LIFECYCLE.WAITING;
 
-    if (
-      options.restoreState &&
-      typeof options.restoreState === "object" &&
-      typeof (this.state as unknown as { restore?: unknown }).restore === "function"
-    ) {
-      (this.state as unknown as { restore(value: unknown): void }).restore(
-        options.restoreState,
-      );
-      // Session ids and transport flags belong to the old process. Users
-      // reclaim persisted player records through onAuth/onJoin.
-      for (const player of this.state.players.values()) {
-        player.sessionId = "";
-        player.connected = false;
-      }
-      for (const spectator of this.state.spectators.values()) {
-        this.state.spectators.delete(spectator.userId);
-      }
-    }
+    this.restoreLobbyState(options.restoreState);
 
     this.refreshMetadata();
 
@@ -1376,6 +1359,76 @@ export abstract class BaseGameRoom<
     }
   }
 
+  /**
+   * Rehydrate only the durable lobby contract. Colyseus Schema instances do
+   * not expose a generic `restore()` method, so assigning the JSON snapshot
+   * wholesale would silently leave the new room empty. Game-specific fields
+   * are intentionally reset to their constructor defaults because snapshots
+   * are only retained while a lobby is WAITING or READY.
+   */
+  private restoreLobbyState(value: unknown) {
+    const source = asRecord(value);
+    if (!source) return;
+
+    const state = this.state as TState & {
+      turnDurationMs?: number;
+    };
+    state.targetPlayers = boundedUint8(source.targetPlayers, state.targetPlayers);
+    state.phase = readString(source.phase, LIFECYCLE.WAITING);
+    state.startedAt = readNumber(source.startedAt, 0);
+    state.hostUserId = readString(source.hostUserId, "");
+    if (typeof source.turnDurationMs === "number") {
+      state.turnDurationMs = Math.max(0, Math.trunc(source.turnDurationMs));
+    }
+
+    for (const player of [...state.players.values()]) {
+      state.players.delete(player.userId);
+    }
+    for (const [key, entry] of snapshotEntries(source.players)) {
+      const player = this.createPlayerInstance();
+      player.userId = readString(entry.userId, key);
+      player.name = readString(entry.name, player.userId);
+      player.avatarUrl = readString(entry.avatarUrl, "");
+      player.sessionId = "";
+      player.seat = boundedUint8(entry.seat, 0);
+      player.connected = false;
+      player.voiceMuted = readBoolean(entry.voiceMuted, true);
+      player.adminMuted = readBoolean(entry.adminMuted, false);
+      state.players.set(player.userId, player);
+    }
+
+    for (const request of [...state.pendingPlayerRequests.values()]) {
+      state.pendingPlayerRequests.delete(request.userId);
+    }
+    for (const [key, entry] of snapshotEntries(source.pendingPlayerRequests)) {
+      const request = new PendingRequestSchema();
+      request.requestId = readString(entry.requestId, key);
+      request.userId = readString(entry.userId, key);
+      request.name = readString(entry.name, request.userId);
+      request.requestedAt = boundedUint32(entry.requestedAt, 0);
+      state.pendingPlayerRequests.set(request.userId, request);
+    }
+
+    for (const result of [...state.joinRequestResults.values()]) {
+      state.joinRequestResults.delete(result.requestId);
+    }
+    for (const [key, entry] of snapshotEntries(source.joinRequestResults)) {
+      const result = new JoinRequestResultSchema();
+      result.requestId = readString(entry.requestId, key);
+      result.userId = readString(entry.userId, "");
+      result.status = readString(entry.status, "");
+      result.updatedAt = boundedUint32(entry.updatedAt, 0);
+      result.reason = readString(entry.reason, "");
+      state.joinRequestResults.set(result.requestId, result);
+    }
+
+    // Spectators are transport-only and cannot be meaningfully reattached
+    // after a process restart. They can join again as spectators normally.
+    for (const spectator of [...state.spectators.values()]) {
+      state.spectators.delete(spectator.userId);
+    }
+  }
+
   /** Exposed for tests. */
   public get isStarted(): boolean {
     return this.started;
@@ -1422,4 +1475,46 @@ function SpectatorFactory(
   record.name = name;
   record.sessionId = sessionId;
   return record;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function snapshotEntries(value: unknown): Array<[string, Record<string, unknown>]> {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) => {
+      const record = asRecord(entry);
+      return record ? [[String(index), record] as [string, Record<string, unknown>]] : [];
+    });
+  }
+  const record = asRecord(value);
+  return record
+    ? Object.entries(record).flatMap(([key, entry]) => {
+        const child = asRecord(entry);
+        return child ? [[key, child] as [string, Record<string, unknown>]] : [];
+      })
+    : [];
+}
+
+function readString(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function boundedUint8(value: unknown, fallback: number): number {
+  return Math.max(0, Math.min(255, Math.trunc(readNumber(value, fallback))));
+}
+
+function boundedUint32(value: unknown, fallback: number): number {
+  return Math.max(0, Math.min(4_294_967_295, Math.trunc(readNumber(value, fallback))));
 }
