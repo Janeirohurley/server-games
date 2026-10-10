@@ -2,6 +2,13 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.3] - 2026-10-10
+
+### Fixed
+
+* Restored lobby snapshots through Colyseus' historical room-id path so
+  existing invitation links remain valid after a process restart.
+
 ## [0.4.2] - 2026-10-10
 
 ### Fixed

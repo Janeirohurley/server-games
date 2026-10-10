@@ -1,5 +1,6 @@
 import assert from "assert";
 import { JWT } from "@colyseus/auth";
+import { roomSnapshotStore } from "../src/rooms/room-snapshot-store.js";
 
 import { getTestServer, type TestServer } from "./test-server.js";
 import type { LudoRoom } from "../src/games/ludo/ludo-room.js";
@@ -335,6 +336,26 @@ describe("phantom reaping after the reconnection grace", () => {
       "old spectator transports are not restored",
     );
     assert.strictEqual(room.state.turnDurationMs, 60_000);
+  });
+
+  it("restores a lobby with the historical room id used by invite links", async () => {
+    const listing = await roomSnapshotStore.restoreSnapshot({
+      roomId: "restored-lobby-id-001",
+      roomName: "ludo",
+      options: { targetPlayers: 2 },
+      state: {
+        targetPlayers: 2,
+        phase: "waiting",
+        hostUserId: "user-a",
+        players: {},
+        pendingPlayerRequests: {},
+        joinRequestResults: {},
+        spectators: {},
+      },
+      savedAt: Date.now(),
+    });
+
+    assert.strictEqual(listing.roomId, "restored-lobby-id-001");
   });
 
   it("frees a dropped spectator slot too", async () => {

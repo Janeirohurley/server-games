@@ -34,7 +34,8 @@ Lobby rooms in `WAITING` or `READY` are snapshotted to PostgreSQL when
 `NODE_ENV=production` and `DATABASE_URL` are configured. The snapshot contains
 the room identity, creation options, host identity, capacity, and authoritative
 join-request state. It is restored at server startup before normal room use, so
-pending requests remain recoverable after a process crash or Render restart.
+pending requests remain recoverable after a process crash or Render restart,
+with the original room ID preserved for existing invitation links.
 
 This persistence is deliberately limited to lobbies. An in-progress match is
 removed from the snapshot store and is not rehydrated, because restoring it

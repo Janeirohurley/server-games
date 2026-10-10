@@ -1,6 +1,7 @@
 import postgres, { type Sql } from "postgres";
 
 import { matchMaker } from "colyseus";
+import { isDevMode, setDevMode } from "@colyseus/core";
 
 const TABLE = "game_room_snapshots";
 
@@ -128,15 +129,33 @@ class RoomSnapshotStore {
     }
   }
 
+  async restoreSnapshot(snapshot: PersistedRoomSnapshot) {
+    // Colyseus' public createRoom() always generates a new id in production
+    // and silently ignores restoreRoomId. The internal restoration path is
+    // the only supported way to preserve the invite URL. Startup runs before
+    // listen() accepts clients, so temporarily enabling its restore branch is
+    // race-free and is reverted immediately.
+    const previousDevMode = isDevMode;
+    setDevMode(true);
+    try {
+      return await matchMaker.handleCreateRoom(
+        snapshot.roomName,
+        {
+          ...snapshot.options,
+          restoreState: snapshot.state,
+        },
+        snapshot.roomId,
+      );
+    } finally {
+      setDevMode(previousDevMode);
+    }
+  }
+
   async restoreRooms() {
     const snapshots = await this.loadAll();
     for (const snapshot of snapshots) {
       try {
-        await matchMaker.createRoom(snapshot.roomName, {
-          ...snapshot.options,
-          restoreRoomId: snapshot.roomId,
-          restoreState: snapshot.state,
-        });
+        await this.restoreSnapshot(snapshot);
       } catch (error) {
         console.warn(
           `[realtime] could not restore room ${snapshot.roomId}:`,
