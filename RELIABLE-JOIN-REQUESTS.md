@@ -10,7 +10,8 @@ terminal outcomes in `joinRequestResults`.
 The lifecycle is `pending → accepted | rejected | cancelled | expired`.
 Retries reuse the same identifier and return the existing registration instead of
 creating duplicates. Only the authenticated host can approve or reject a request,
-and an accepted request reserves a seat until its requester reconnects.
+and an accepted request reserves a seat until its requester reconnects or the
+ten-minute approval window expires.
 
 ## Reconnection behavior
 
