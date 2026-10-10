@@ -1031,6 +1031,29 @@ export abstract class BaseGameRoom<
         reason: "request-timeout",
       });
     }
+
+    // An offline approval must not reserve a seat forever. Once it expires,
+    // the requester can submit a fresh request and the seat becomes usable.
+    for (const result of [...this.state.joinRequestResults.values()]) {
+      if (
+        result.status !== "accepted" ||
+        [...this.state.players.values()].some(
+          (player) => player.userId === result.userId,
+        ) ||
+        now - result.updatedAt < JOIN_REQUEST_TTL_MS
+      ) {
+        continue;
+      }
+      result.status = "expired";
+      result.reason = "approval-timeout";
+      result.updatedAt = Math.min(now, 4_294_967_295);
+      this.logJoinRequest("expired", result.requestId, result.userId, result.reason);
+      this.broadcast("joinRequestExpired", {
+        userId: result.userId,
+        requestId: result.requestId,
+        reason: result.reason,
+      });
+    }
   }
 
   private logJoinRequest(
