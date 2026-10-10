@@ -211,6 +211,113 @@ describe("phantom reaping after the reconnection grace", () => {
     );
   });
 
+  it("waits for durable storage before acknowledging request registration", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+
+    const acknowledgements = collect<{ requestId: string }>(
+      bob,
+      "joinRequestRegistered",
+    );
+    const deliveries = collect<{ requestId: string }>(alice, "joinRequested");
+    let writes = 0;
+    let finishWrite!: (saved: boolean) => void;
+    const writeFinished = new Promise<boolean>((resolve) => {
+      finishWrite = resolve;
+    });
+    const originalSave = roomSnapshotStore.save;
+    roomSnapshotStore.save = async (snapshot) => {
+      writes += 1;
+      assert.ok(
+        (snapshot.state.pendingPlayerRequests as Record<string, unknown>)["user-b"],
+        "the durable candidate includes the pending request",
+      );
+      return writeFinished;
+    };
+
+    try {
+      bob.send("requestJoinAsPlayer", { requestId: "durable-request-001" });
+      bob.send("requestJoinAsPlayer", { requestId: "durable-request-001" });
+      await tick();
+      assert.strictEqual(writes, 1, "concurrent retries share one durable write");
+      assert.strictEqual(
+        acknowledgements.length,
+        0,
+        "registration is not acknowledged while persistence is pending",
+      );
+      assert.strictEqual(
+        room.state.pendingPlayerRequests.has("user-b"),
+        false,
+        "unconfirmed requests are not exposed in shared room state",
+      );
+      finishWrite(true);
+      await tick();
+      assert.ok(
+        acknowledgements.some((item) => item.requestId === "durable-request-001"),
+        "registration is acknowledged after durable storage succeeds",
+      );
+      assert.ok(
+        room.state.pendingPlayerRequests.has("user-b"),
+        "the server remains authoritative for the registered request",
+      );
+      assert.strictEqual(
+        deliveries.filter((item) => item.requestId === "durable-request-001").length,
+        1,
+        "concurrent retries produce one notification for the host",
+      );
+    } finally {
+      roomSnapshotStore.save = originalSave;
+    }
+  });
+
+  it("reports registration failure when durable storage rejects the write", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+
+    const failures = collect<{ reason: string }>(
+      bob,
+      "joinRequestRegistrationFailed",
+    );
+    const acknowledgements = collect<{ requestId: string }>(
+      bob,
+      "joinRequestRegistered",
+    );
+    const originalSave = roomSnapshotStore.save;
+    roomSnapshotStore.save = async () => false;
+
+    try {
+      bob.send("requestJoinAsPlayer", { requestId: "failed-durable-request-001" });
+      await tick();
+      assert.strictEqual(failures[0]?.reason, "persistence-unavailable");
+      assert.strictEqual(acknowledgements.length, 0);
+      assert.strictEqual(
+        room.state.pendingPlayerRequests.has("user-b"),
+        false,
+        "failed requests are not left pending in volatile room state",
+      );
+    } finally {
+      roomSnapshotStore.save = originalSave;
+    }
+  });
+
   it("keeps an approval authoritative while the requester is offline", async () => {
     const room = (await colyseus.createRoom("ludo", {
       targetPlayers: 2,

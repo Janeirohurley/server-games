@@ -2,6 +2,13 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.4] - 2026-10-10
+
+### Fixed
+
+* Serialized concurrent retries for the same user while durable registration
+  is in flight, preventing duplicate writes and host notifications.
+
 ## [0.4.3] - 2026-10-10
 
 ### Fixed

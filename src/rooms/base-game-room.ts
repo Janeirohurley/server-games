@@ -116,6 +116,8 @@ export abstract class BaseGameRoom<
   private started = false;
   private closed = false;
   private joinRequestSweep?: Delayed;
+  /** Serializes retries while the first durable registration is in flight. */
+  private joinRequestRegistrations = new Map<string, Promise<boolean>>();
 
   /**
    * This room's chat. Every game inherits it — nothing below is
@@ -984,6 +986,14 @@ export abstract class BaseGameRoom<
       return;
     }
 
+    const inFlight = this.joinRequestRegistrations.get(identity.userId);
+    if (inFlight) {
+      const durable = await inFlight;
+      const registered = this.state.pendingPlayerRequests.get(identity.userId);
+      if (durable && registered) this.sendJoinRequestAck(identity.userId, registered);
+      return;
+    }
+
     const requestId =
       typeof requestedId === "string" && /^[a-zA-Z0-9._:-]{8,128}$/.test(requestedId)
         ? requestedId
@@ -994,20 +1004,35 @@ export abstract class BaseGameRoom<
       identity.name,
       Math.min(this.clock.currentTime, 4_294_967_295),
     );
-    this.state.pendingPlayerRequests.set(identity.userId, request);
-    this.refreshMetadata(false);
-    if (!(await this.persistLobbySnapshot())) {
-      this.sendJoinRequestFailure(identity.userId);
-      return;
+    const registration = this.persistAndPublishJoinRequest(request);
+    this.joinRequestRegistrations.set(identity.userId, registration);
+    try {
+      await registration;
+    } finally {
+      if (this.joinRequestRegistrations.get(identity.userId) === registration) {
+        this.joinRequestRegistrations.delete(identity.userId);
+      }
     }
-    this.sendJoinRequestAck(identity.userId, request);
+  }
+
+  private async persistAndPublishJoinRequest(
+    request: LobbyPendingRequestLike,
+  ): Promise<boolean> {
+    if (!(await this.persistLobbySnapshot(this.snapshotWithPendingRequest(request)))) {
+      this.sendJoinRequestFailure(request.userId);
+      return false;
+    }
+    this.state.pendingPlayerRequests.set(request.userId, request);
+    this.refreshMetadata(false);
+    this.sendJoinRequestAck(request.userId, request);
     this.logJoinRequest("registered", request.requestId, request.userId);
     this.broadcast("joinRequested", {
       requestId: request.requestId,
-      userId: identity.userId,
-      name: identity.name,
+      userId: request.userId,
+      name: request.name,
       requestedAt: request.requestedAt,
     });
+    return true;
   }
 
   private sendJoinRequestAck(userId: string, request: LobbyPendingRequestLike) {
@@ -1375,7 +1400,9 @@ export abstract class BaseGameRoom<
     if (persist) void this.persistLobbySnapshot();
   }
 
-  private persistLobbySnapshot(): Promise<boolean> {
+  private persistLobbySnapshot(
+    stateOverride?: Record<string, unknown>,
+  ): Promise<boolean> {
     if (
       this.state.phase === LIFECYCLE.WAITING ||
       this.state.phase === LIFECYCLE.READY
@@ -1388,11 +1415,31 @@ export abstract class BaseGameRoom<
           creatorUserId: this.state.hostUserId,
           reconnectionGrace: this.reconnectionGraceSeconds,
         },
-        state: (this.state as unknown as { toJSON(): Record<string, unknown> }).toJSON(),
+        state:
+          stateOverride ??
+          (this.state as unknown as { toJSON(): Record<string, unknown> }).toJSON(),
         savedAt: Date.now(),
       });
     }
     return roomSnapshotStore.remove(this.roomId).then(() => true);
+  }
+
+  private snapshotWithPendingRequest(
+    request: LobbyPendingRequestLike,
+  ): Record<string, unknown> {
+    const state = (this.state as unknown as {
+      toJSON(): Record<string, unknown>;
+    }).toJSON();
+    const pending = Object.fromEntries(
+      snapshotEntries(state.pendingPlayerRequests),
+    );
+    pending[request.userId] = {
+      requestId: request.requestId,
+      userId: request.userId,
+      name: request.name,
+      requestedAt: request.requestedAt,
+    };
+    return { ...state, pendingPlayerRequests: pending };
   }
 
   /**
