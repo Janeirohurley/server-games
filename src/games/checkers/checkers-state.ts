@@ -5,7 +5,11 @@ import type {
   LobbyPlayersMapLike,
   LobbyStateLike,
 } from "../../rooms/schema/lobby-state.js";
-import { PendingRequestSchema, SpectatorSchema } from "../../rooms/schema/lobby-state.js";
+import {
+  JoinRequestResultSchema,
+  PendingRequestSchema,
+  SpectatorSchema,
+} from "../../rooms/schema/lobby-state.js";
 import type { Color } from "./engine/index.js";
 
 // The board encoding is the engine's — the wire format and the rules
@@ -68,6 +72,7 @@ export const CheckersStateSchema = schema({
   hostUserId: t.string().default(""),
   players: t.map(CheckersPlayerSchema),
   pendingPlayerRequests: t.map(PendingRequestSchema),
+  joinRequestResults: t.map(JoinRequestResultSchema),
   spectators: t.map(SpectatorSchema),
 
   // --- checkers-specific fields ---

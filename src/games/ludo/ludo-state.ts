@@ -1,6 +1,7 @@
 import { schema, t, type SchemaType } from "@colyseus/schema";
 
 import {
+  JoinRequestResultSchema,
   PendingRequestSchema,
   SpectatorSchema,
   type LobbyPlayerLike,
@@ -283,6 +284,7 @@ export const LudoStateSchema = schema({
   hostUserId: t.string().default(""),
   players: t.map(LudoPlayerSchema),
   pendingPlayerRequests: t.map(PendingRequestSchema),
+  joinRequestResults: t.map(JoinRequestResultSchema),
   spectators: t.map(SpectatorSchema),
 
   // --- ludo-specific fields ---

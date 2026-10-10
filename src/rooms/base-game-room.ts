@@ -6,14 +6,17 @@ import {
   type Delayed,
   type Messages,
 } from "colyseus";
+import { randomUUID } from "node:crypto";
 
 import {
   LIFECYCLE,
+  JoinRequestResultSchema,
   PendingRequestSchema,
   SpectatorSchema,
   type LobbyStateLike,
   type LobbyPlayerLike,
   type LobbyPendingRequestLike,
+  type LobbyJoinRequestResultLike,
   type LobbySpectatorLike,
 } from "./schema/lobby-state.js";
 import type { RealtimeIdentity } from "../auth/verify-token.js";
@@ -272,6 +275,27 @@ export abstract class BaseGameRoom<
       return;
     }
 
+    const acceptedRequest = this.latestJoinRequestResult(identity.userId, "accepted");
+    if (acceptedRequest) {
+      this.seatPlayer(identity, client.sessionId);
+      client.send("joinRequestApproved", acceptedRequest);
+      this.sendChatSnapshot(client);
+      return;
+    }
+
+    // A request is room state, not a socket event. Rejoining a room with an
+    // existing pending entry must restore it instead of creating a new one.
+    const pendingRequest = this.state.pendingPlayerRequests.get(identity.userId);
+    if (pendingRequest) {
+      client.send("joinRequestRegistered", {
+        requestId: pendingRequest.requestId,
+        status: "pending",
+        requestedAt: pendingRequest.requestedAt,
+      });
+      this.sendChatSnapshot(client);
+      return;
+    }
+
     if (this.started) {
       // Matches in progress do not accept new players at all; watching
       // remains available (section 13).
@@ -373,13 +397,16 @@ export abstract class BaseGameRoom<
         this.handleChatTyping(client, message),
 
       // Join requests (section 5).
-      requestJoinAsPlayer: (client: Client) => this.handleJoinRequest(client),
+      requestJoinAsPlayer: (
+        client: Client,
+        message: { requestId?: string },
+      ) => this.handleJoinRequest(client, message),
       cancelJoinRequest: (client: Client) => this.handleCancelRequest(client),
 
       // Admin actions (sections 5, 6, 12) — host-only, validated here.
-      approveJoin: (client: Client, message: { userId?: string }) =>
+      approveJoin: (client: Client, message: { userId?: string; requestId?: string }) =>
         this.handleApproveJoin(client, message),
-      rejectJoin: (client: Client, message: { userId?: string }) =>
+      rejectJoin: (client: Client, message: { userId?: string; requestId?: string }) =>
         this.handleRejectJoin(client, message),
       closeRoom: (client: Client) => this.handleCloseRoom(client),
       updateLobbySettings: (client: Client, message: unknown) =>
@@ -579,7 +606,7 @@ export abstract class BaseGameRoom<
   protected onLobbySettingsApplied(_message: LobbySettingsInput | undefined) {}
 
   /** A user asks for a player seat — lands in the approval queue. */
-  private handleJoinRequest(client: Client) {
+  private handleJoinRequest(client: Client, message: { requestId?: string } = {}) {
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     // Guests are spectators by nature — the seat queue is not for them.
@@ -603,21 +630,29 @@ export abstract class BaseGameRoom<
       return;
     }
 
-    this.enqueueJoinRequest(identity);
+    this.enqueueJoinRequest(identity, message.requestId);
   }
 
   /** A requester withdraws their own pending request. */
   private handleCancelRequest(client: Client) {
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
-    if (!this.state.pendingPlayerRequests.get(identity.userId)) return;
+    const request = this.state.pendingPlayerRequests.get(identity.userId);
+    if (!request) return;
 
     this.state.pendingPlayerRequests.delete(identity.userId);
-    this.broadcast("joinRequestCancelled", { userId: identity.userId });
+    this.recordJoinRequestResult(request, "cancelled", "requester-cancelled");
+    this.broadcast("joinRequestCancelled", {
+      userId: identity.userId,
+      requestId: request.requestId,
+    });
   }
 
   /** Admin accepts a pending requester — all four checks of section 6. */
-  private handleApproveJoin(client: Client, message: { userId?: string }) {
+  private handleApproveJoin(
+    client: Client,
+    message: { userId?: string; requestId?: string },
+  ) {
     const admin = this.adminBySession(client.sessionId);
     if (!admin) return; // permission: admin only
     // A guest token must never be able to run the room, belt and braces.
@@ -626,6 +661,7 @@ export abstract class BaseGameRoom<
     const userId = String(message?.userId ?? "");
     const request = this.state.pendingPlayerRequests.get(userId);
     if (!request) return; // unknown or already handled
+    if (message?.requestId && message.requestId !== request.requestId) return;
 
     // Section 6 — validate before seating.
     if (this.closed || this.started) {
@@ -644,21 +680,27 @@ export abstract class BaseGameRoom<
     };
     const requesterSession = this.sessionIdOfUser(userId);
     this.state.pendingPlayerRequests.delete(userId);
+    this.recordJoinRequestResult(request, "accepted", "approved");
 
     if (requesterSession) {
       // Still connected: promote in place, keep their session.
       this.seatPlayer(identity, requesterSession);
     } else {
-      // The requester's connection dropped while queued. Their request
-      // was approved, but a seat needs a live session — record nothing
-      // and let them re-request on return (they will find the room
-      // state honestly reflects that they are not seated).
-      this.broadcast("joinRequestExpired", { userId });
+      // The requester's connection dropped while queued. Keep the
+      // authoritative approval in room state; a later reconnect will
+      // reclaim the reserved request and receive the seat.
+      this.broadcast("joinRequestApproved", {
+        userId,
+        requestId: request.requestId,
+        name: request.name,
+        players: this.state.players.size,
+      });
       return;
     }
 
     this.broadcast("joinRequestApproved", {
       userId,
+      requestId: request.requestId,
       name: request.name,
       players: this.state.players.size,
     });
@@ -666,16 +708,22 @@ export abstract class BaseGameRoom<
   }
 
   /** Admin declines a pending requester. */
-  private handleRejectJoin(client: Client, message: { userId?: string }) {
+  private handleRejectJoin(
+    client: Client,
+    message: { userId?: string; requestId?: string },
+  ) {
     if (!this.isAdmin(client.sessionId)) return;
 
     const userId = String(message?.userId ?? "");
     const request = this.state.pendingPlayerRequests.get(userId);
     if (!request) return;
+    if (message?.requestId && message.requestId !== request.requestId) return;
 
     this.state.pendingPlayerRequests.delete(userId);
+    this.recordJoinRequestResult(request, "rejected", "declined");
     this.broadcast("joinRequestRejected", {
       userId,
+      requestId: request.requestId,
       name: request.name,
       reason: "declined",
     });
@@ -688,6 +736,12 @@ export abstract class BaseGameRoom<
 
     this.closed = true;
     this.state.phase = LIFECYCLE.CLOSED;
+    for (const request of this.state.pendingPlayerRequests.values()) {
+      this.recordJoinRequestResult(request, "expired", "room-closed");
+    }
+    for (const request of [...this.state.pendingPlayerRequests.values()]) {
+      this.state.pendingPlayerRequests.delete(request.userId);
+    }
     this.lock();
     this.refreshMetadata();
     this.broadcast("roomClosed", {});
@@ -883,17 +937,76 @@ export abstract class BaseGameRoom<
   // ------------------------------------------------------------------
 
   /** Queue a user as a pending player request and tell the room. */
-  private enqueueJoinRequest(identity: RealtimeIdentity) {
+  private enqueueJoinRequest(identity: RealtimeIdentity, requestedId?: string) {
+    const existing = this.state.pendingPlayerRequests.get(identity.userId);
+    if (existing) {
+      this.sendJoinRequestAck(identity.userId, existing);
+      return;
+    }
+
+    const requestId =
+      typeof requestedId === "string" && /^[a-zA-Z0-9._:-]{8,128}$/.test(requestedId)
+        ? requestedId
+        : randomUUID();
     const request: LobbyPendingRequestLike = PendingRequestFactory(
+      requestId,
       identity.userId,
       identity.name,
       Math.min(this.clock.currentTime, 4_294_967_295),
     );
     this.state.pendingPlayerRequests.set(identity.userId, request);
+    this.sendJoinRequestAck(identity.userId, request);
     this.broadcast("joinRequested", {
+      requestId: request.requestId,
       userId: identity.userId,
       name: identity.name,
+      requestedAt: request.requestedAt,
     });
+  }
+
+  private sendJoinRequestAck(userId: string, request: LobbyPendingRequestLike) {
+    const sessionId = this.sessionIdOfUser(userId);
+    const client = sessionId ? this.clients.find((item) => item.sessionId === sessionId) : undefined;
+    client?.send("joinRequestRegistered", {
+      requestId: request.requestId,
+      status: "pending",
+      requestedAt: request.requestedAt,
+    });
+  }
+
+  private recordJoinRequestResult(
+    request: LobbyPendingRequestLike,
+    status: "accepted" | "rejected" | "cancelled" | "expired",
+    reason: string,
+  ) {
+    const result = new JoinRequestResultSchema();
+    result.requestId = request.requestId;
+    result.userId = request.userId;
+    result.status = status;
+    result.updatedAt = Math.min(this.clock.currentTime, 4_294_967_295);
+    result.reason = reason;
+    this.state.joinRequestResults.set(request.requestId, result);
+    return result;
+  }
+
+  private latestJoinRequestResult(
+    userId: string,
+    status?: "accepted" | "rejected" | "cancelled" | "expired",
+  ): LobbyJoinRequestResultLike | undefined {
+    return [...this.state.joinRequestResults.values()]
+      .filter((result) => result.userId === userId && (!status || result.status === status))
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  }
+
+  private clearJoinRequestResults(
+    userId: string,
+    status?: "accepted" | "rejected" | "cancelled" | "expired",
+  ) {
+    for (const result of [...this.state.joinRequestResults.values()]) {
+      if (result.userId === userId && (!status || result.status === status)) {
+        this.state.joinRequestResults.delete(result.requestId);
+      }
+    }
   }
 
   /** Seat an approved user: build their player record and register it. */
@@ -967,6 +1080,7 @@ export abstract class BaseGameRoom<
       if (kind === "consented" || kind === "evicted") {
         const name = player.name;
         this.state.players.delete(userId);
+        this.clearJoinRequestResults(userId, "accepted");
         this.broadcast("playerLeft", { userId, name });
 
         // Admin left without closing: transfer to the most senior
@@ -1005,17 +1119,18 @@ export abstract class BaseGameRoom<
       return;
     }
 
-    // A pending requester whose connection ended for good (consented
-    // leave, or a drop whose reconnection window just expired): the
-    // queue entry goes too — a request nobody can reach is worthless,
-    // and a stale one must never survive a later re-request. Purged
-    // unconditionally: the OLD session's final leave must also clear
-    // the request when the user already moved to a fresh connection
-    // mid-grace (that fresh join refreshed the entry, so without this
-    // purge the admin would see a ghost that no leave ever removed).
-    if (this.state.pendingPlayerRequests.get(userId)) {
+    // A deliberate leave is an explicit cancellation. An unexpected
+    // disconnect keeps the request in authoritative room state so a
+    // reconnecting requester or host can recover it.
+    if (kind === "consented") {
+      const request = this.state.pendingPlayerRequests.get(userId);
+      if (!request) return;
       this.state.pendingPlayerRequests.delete(userId);
-      this.broadcast("joinRequestCancelled", { userId });
+      this.recordJoinRequestResult(request, "cancelled", "requester-left");
+      this.broadcast("joinRequestCancelled", {
+        userId,
+        requestId: request.requestId,
+      });
     }
   }
 
@@ -1055,17 +1170,9 @@ export abstract class BaseGameRoom<
         this.schedulePhantomReap(userId);
       }
 
-      // A pending requester's connection died with the request — purge
-      // it HERE, not in onLeave. A fresh page load re-authenticates and
-      // DELETES the old identity in onAuth, so the old session's late
-      // onLeave bails out before handleDeparture ever runs and nothing
-      // would expire the stale entry; every later re-request would see
-      // the same recycled notification. The queue is for people who can
-      // be reached for approval.
-      if (this.state.pendingPlayerRequests.get(userId)) {
-        this.state.pendingPlayerRequests.delete(userId);
-        this.broadcast("joinRequestCancelled", { userId });
-      }
+      // Pending requests are deliberately retained. Room state is the
+      // delivery queue; the requester can reconnect and the host can
+      // still approve or reject without relying on a transient message.
     }
   }
 
@@ -1164,11 +1271,13 @@ export interface JoinOptions {
 // ---------------------------------------------------------------------------
 
 function PendingRequestFactory(
+  requestId: string,
   userId: string,
   name: string,
   requestedAt: number,
 ): LobbyPendingRequestLike {
   const record = new PendingRequestSchema();
+  record.requestId = requestId;
   record.userId = userId;
   record.name = name;
   record.requestedAt = requestedAt;

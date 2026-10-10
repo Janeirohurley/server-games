@@ -5,7 +5,11 @@ import type {
   LobbyPlayersMapLike,
   LobbyStateLike,
 } from "../../rooms/schema/lobby-state.js";
-import { PendingRequestSchema, SpectatorSchema } from "../../rooms/schema/lobby-state.js";
+import {
+  JoinRequestResultSchema,
+  PendingRequestSchema,
+  SpectatorSchema,
+} from "../../rooms/schema/lobby-state.js";
 
 /**
  * Rally state synchronized to both clients.
@@ -51,6 +55,7 @@ export const RallyStateSchema = schema({
   hostUserId: t.string().default(""),
   players: t.map(RallyPlayerSchema),
   pendingPlayerRequests: t.map(PendingRequestSchema),
+  joinRequestResults: t.map(JoinRequestResultSchema),
   spectators: t.map(SpectatorSchema),
 
   // --- match state ---

@@ -117,7 +117,7 @@ describe("phantom reaping after the reconnection grace", () => {
     assert.strictEqual(record.sessionId, bobAgain.sessionId);
   });
 
-  it("a dropped requester's join request dies with the connection — re-requesting starts fresh", async () => {
+  it("keeps a dropped join request recoverable after the grace window", async () => {
     const room = (await colyseus.createRoom("ludo", {
       targetPlayers: 2,
       reconnectionGrace: 2,
@@ -138,26 +138,109 @@ describe("phantom reaping after the reconnection grace", () => {
     kill(bob);
     await tick();
 
-    // The request expires the moment its connection dies. It cannot be
-    // left for the late onLeave: a fresh rejoin would have deleted the
-    // old identity (onAuth), so that leave bails before the purge.
+    // A dropped requester is not a deliberate cancellation. The request
+    // remains authoritative even after the transport grace expires.
+    const requestId = room.state.pendingPlayerRequests.get("user-b")?.requestId;
     assert.ok(
-      !room.state.pendingPlayerRequests.has("user-b"),
-      "a departed requester's pending entry must expire",
+      room.state.pendingPlayerRequests.has("user-b"),
+      "a dropped request must remain recoverable",
     );
     assert.ok(
-      cancelled.some((m) => m.userId === "user-b"),
-      "everyone was told the request is gone",
+      !cancelled.some((m) => m.userId === "user-b"),
+      "a transport loss must not broadcast cancellation",
     );
 
-    // Coming back on a fresh connection re-queues a NEW request — a
-    // live entry tied to the new session, never the recycled ghost.
+    await pastGrace();
+    assert.strictEqual(
+      room.state.pendingPlayerRequests.get("user-b")?.requestId,
+      requestId,
+      "the request id survives the reconnection grace",
+    );
+
+    // Coming back restores the same request instead of creating a duplicate.
     const bobAgain = await colyseus.connectTo(room, {
       token: await mintToken("user-b", "Bob"),
     });
     await tick();
     const request = room.state.pendingPlayerRequests.get("user-b");
-    assert.ok(request, "re-request after expiry starts fresh");
+    assert.strictEqual(request?.requestId, requestId);
+    void bobAgain;
+  });
+
+  it("acknowledges the same request id without duplicating the queue entry", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+
+    const registered = collect<{ requestId: string; status: string }>(
+      bob,
+      "joinRequestRegistered",
+    );
+    const requested = collect<{ requestId: string }>(alice, "joinRequested");
+    const requestId = "retryable-request-001";
+
+    bob.send("cancelJoinRequest", {});
+    await tick();
+    registered.length = 0;
+    requested.length = 0;
+
+    bob.send("requestJoinAsPlayer", { requestId });
+    bob.send("requestJoinAsPlayer", { requestId });
+    await tick();
+
+    assert.strictEqual(
+      room.state.pendingPlayerRequests.get("user-b")?.requestId,
+      requestId,
+    );
+    assert.strictEqual(
+      requested.filter((item) => item.requestId === requestId).length,
+      1,
+      "a retry must not create a second notification",
+    );
+    assert.ok(
+      registered.some((item) => item.requestId === requestId && item.status === "pending"),
+      "the requester receives a server registration acknowledgement",
+    );
+  });
+
+  it("keeps an approval authoritative while the requester is offline", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+      reconnectionGrace: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+    const requestId = room.state.pendingPlayerRequests.get("user-b")?.requestId;
+    assert.ok(requestId);
+
+    kill(bob);
+    await tick();
+    alice.send("approveJoin", { userId: "user-b", requestId });
+    await tick();
+
+    assert.strictEqual(room.state.pendingPlayerRequests.has("user-b"), false);
+    assert.strictEqual(
+      room.state.joinRequestResults.get(requestId)?.status,
+      "accepted",
+    );
+
+    const bobAgain = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+    assert.ok(room.state.players.has("user-b"));
     void bobAgain;
   });
 
