@@ -25,12 +25,20 @@ ten-minute approval window expires.
 
 ## Persistence boundary
 
-Colyseus room state is process-memory state. It survives socket loss and reconnect
-while the room instance exists, but not a server restart, process crash, or room
-destruction. The current database integration is for the admin plugin, not a
-durable room/game state store.
+Lobby rooms in `WAITING` or `READY` are snapshotted to PostgreSQL when
+`NODE_ENV=production` and `DATABASE_URL` are configured. The snapshot contains
+the room identity, creation options, host identity, capacity, and authoritative
+join-request state. It is restored at server startup before normal room use, so
+pending requests remain recoverable after a process crash or Render restart.
 
-The implementation therefore guarantees recovery across temporary disconnections,
-not after server loss. Stronger recovery requires a persistent room registry,
-durable request records, and room rehydration; a request table alone is
-insufficient because room, player, and capacity state would also need restoring.
+This persistence is deliberately limited to lobbies. An in-progress match is
+removed from the snapshot store and is not rehydrated, because restoring it
+without its simulation timers and transient player connections would create a
+false state. A server restart during an active match therefore still requires a
+separate game-session recovery design.
+
+Development/tests can opt in with `REALTIME_ROOM_PERSISTENCE=1`. If the database
+is unavailable, the server continues in memory-only mode and logs the degraded
+guarantee. The current deployment assumes one authoritative game process (the
+normal Render service configuration); multi-process shared matchmaker/locking
+would need an additional deployment design.

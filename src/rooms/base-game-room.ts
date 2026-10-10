@@ -22,6 +22,7 @@ import {
 import type { RealtimeIdentity } from "../auth/verify-token.js";
 import type { GameDefinition } from "../games/registry.js";
 import { RoomChat, type RoomChatRequest } from "./room-chat.js";
+import { roomSnapshotStore } from "./room-snapshot-store.js";
 import { reportMatchFinished, type ParticipantReport } from "../profile/profile-reporting.js";
 
 /**
@@ -127,9 +128,15 @@ export abstract class BaseGameRoom<
       targetPlayers?: number;
       creatorUserId?: string;
       reconnectionGrace?: number;
+      restoreRoomId?: string;
+      restoreState?: unknown;
     } = {},
   ) {
     const def = this.game;
+
+    if (options.restoreRoomId) {
+      this.roomId = options.restoreRoomId;
+    }
 
     /*
      * Validate the requested table size against the game's own list of
@@ -152,6 +159,25 @@ export abstract class BaseGameRoom<
     this.state.maxPlayers = def.maxPlayers;
     this.state.minPlayers = def.minPlayers;
     this.state.phase = LIFECYCLE.WAITING;
+
+    if (
+      options.restoreState &&
+      typeof options.restoreState === "object" &&
+      typeof (this.state as unknown as { restore?: unknown }).restore === "function"
+    ) {
+      (this.state as unknown as { restore(value: unknown): void }).restore(
+        options.restoreState,
+      );
+      // Session ids and transport flags belong to the old process. Users
+      // reclaim persisted player records through onAuth/onJoin.
+      for (const player of this.state.players.values()) {
+        player.sessionId = "";
+        player.connected = false;
+      }
+      for (const spectator of this.state.spectators.values()) {
+        this.state.spectators.delete(spectator.userId);
+      }
+    }
 
     this.refreshMetadata();
 
@@ -1329,6 +1355,25 @@ export abstract class BaseGameRoom<
       playerIds: [...this.state.players.values()].map((p) => p.userId),
       spectatorIds: [...this.state.spectators.values()].map((s) => s.userId),
     });
+
+    if (
+      this.state.phase === LIFECYCLE.WAITING ||
+      this.state.phase === LIFECYCLE.READY
+    ) {
+      void roomSnapshotStore.save({
+        roomId: this.roomId,
+        roomName: this.roomName,
+        options: {
+          targetPlayers: this.state.targetPlayers,
+          creatorUserId: this.state.hostUserId,
+          reconnectionGrace: this.reconnectionGraceSeconds,
+        },
+        state: (this.state as unknown as { toJSON(): Record<string, unknown> }).toJSON(),
+        savedAt: Date.now(),
+      });
+    } else {
+      void roomSnapshotStore.remove(this.roomId);
+    }
   }
 
   /** Exposed for tests. */

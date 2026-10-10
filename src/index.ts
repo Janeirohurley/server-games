@@ -8,9 +8,11 @@
  * See: https://docs.colyseus.io/server
  */
 import { listen } from "@colyseus/tools";
+import { roomSnapshotStore } from "./rooms/room-snapshot-store.js";
 
 // Import Colyseus config
 import app from "./app.config.js";
 
 // Create and listen on 2567 (or PORT environment variable.)
-listen(app);
+await listen(app);
+await roomSnapshotStore.restoreRooms();
