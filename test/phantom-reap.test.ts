@@ -244,6 +244,35 @@ describe("phantom reaping after the reconnection grace", () => {
     void bobAgain;
   });
 
+  it("ignores a host decision for an obsolete request id", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+
+    const oldRequestId = room.state.pendingPlayerRequests.get("user-b")?.requestId;
+    assert.ok(oldRequestId);
+    bob.send("cancelJoinRequest", {});
+    await tick();
+    bob.send("requestJoinAsPlayer", { requestId: "fresh-request-002" });
+    await tick();
+
+    alice.send("approveJoin", { userId: "user-b", requestId: oldRequestId });
+    await tick();
+
+    assert.strictEqual(room.state.players.has("user-b"), false);
+    assert.strictEqual(
+      room.state.pendingPlayerRequests.get("user-b")?.requestId,
+      "fresh-request-002",
+    );
+  });
+
   it("frees a dropped spectator slot too", async () => {
     const { room, alice } = await seatedRoom();
     const spectatorLeft = collect<{ userId: string }>(
