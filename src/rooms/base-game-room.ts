@@ -30,6 +30,8 @@ import { reportMatchFinished, type ParticipantReport } from "../profile/profile-
  * blip does not eject someone from the match.
  */
 const RECONNECTION_GRACE_SECONDS = 30;
+const JOIN_REQUEST_TTL_MS = 10 * 60 * 1_000;
+const JOIN_REQUEST_SWEEP_MS = 30 * 1_000;
 
 /**
  * A dropped (browser gone, network cut) participant's record is kept
@@ -112,6 +114,7 @@ export abstract class BaseGameRoom<
   protected reconnectionGraceSeconds = RECONNECTION_GRACE_SECONDS;
   private started = false;
   private closed = false;
+  private joinRequestSweep?: Delayed;
 
   /**
    * This room's chat. Every game inherits it — nothing below is
@@ -178,6 +181,11 @@ export abstract class BaseGameRoom<
     if (grace >= 2 && grace <= 120) {
       this.reconnectionGraceSeconds = grace;
     }
+
+    this.joinRequestSweep = this.clock.setInterval(
+      () => this.expirePendingJoinRequests(),
+      JOIN_REQUEST_SWEEP_MS,
+    );
   }
 
   /** Verify the platform JWT and remember the caller's identity. */
@@ -301,7 +309,7 @@ export abstract class BaseGameRoom<
       // remains available (section 13).
       throw new ServerError(4_010, "Match already started — join as spectator");
     }
-    if (this.state.players.size >= this.state.targetPlayers) {
+    if (this.state.players.size + this.acceptedSeatReservations() >= this.state.targetPlayers) {
       throw new ServerError(4_011, "Room is full — join as spectator");
     }
 
@@ -545,6 +553,8 @@ export abstract class BaseGameRoom<
    * `super.onDispose()` so the buffer is dropped with the room.
    */
   public onDispose() {
+    this.joinRequestSweep?.clear();
+    this.joinRequestSweep = undefined;
     this.chat.dispose();
   }
 
@@ -616,6 +626,13 @@ export abstract class BaseGameRoom<
     }
 
     if (this.state.players.get(identity.userId)) return; // already seated
+    // Re-acknowledge an existing request even if the room filled after it
+    // was created; retries must never turn a known request into a false
+    // room-full error.
+    if (this.state.pendingPlayerRequests.get(identity.userId)) {
+      this.enqueueJoinRequest(identity, message.requestId);
+      return;
+    }
     // No pending-swallow here: asking again REFRESHES the request
     // (fresh timestamp + joinRequested) instead of recycling a stale
     // notification — that is exactly what "il refait la demande" must
@@ -625,7 +642,7 @@ export abstract class BaseGameRoom<
       client.send("joinRequestRejected", { reason: "room-unavailable" });
       return;
     }
-    if (this.state.players.size >= this.state.targetPlayers) {
+    if (this.state.players.size + this.acceptedSeatReservations() >= this.state.targetPlayers) {
       client.send("joinRequestRejected", { reason: "room-full" });
       return;
     }
@@ -669,7 +686,7 @@ export abstract class BaseGameRoom<
       return;
     }
     if (this.state.players.get(userId)) return; // already present
-    if (this.state.players.size >= this.state.targetPlayers) {
+    if (this.state.players.size + this.acceptedSeatReservations() >= this.state.targetPlayers) {
       client.send("joinRequestRejected", { reason: "room-full" });
       return;
     }
@@ -956,6 +973,7 @@ export abstract class BaseGameRoom<
     );
     this.state.pendingPlayerRequests.set(identity.userId, request);
     this.sendJoinRequestAck(identity.userId, request);
+    this.logJoinRequest("registered", request.requestId, request.userId);
     this.broadcast("joinRequested", {
       requestId: request.requestId,
       userId: identity.userId,
@@ -986,7 +1004,49 @@ export abstract class BaseGameRoom<
     result.updatedAt = Math.min(this.clock.currentTime, 4_294_967_295);
     result.reason = reason;
     this.state.joinRequestResults.set(request.requestId, result);
+    this.logJoinRequest(status, request.requestId, request.userId, reason);
     return result;
+  }
+
+  /** Accepted requests reserve seats until the requester reclaims them. */
+  private acceptedSeatReservations() {
+    const seated = new Set(
+      [...this.state.players.values()].map((player) => player.userId),
+    );
+    return [...this.state.joinRequestResults.values()].filter(
+      (result) => result.status === "accepted" && !seated.has(result.userId),
+    ).length;
+  }
+
+  private expirePendingJoinRequests() {
+    if (this.closed || this.started) return;
+    const now = this.clock.currentTime;
+    for (const request of [...this.state.pendingPlayerRequests.values()]) {
+      if (now - request.requestedAt < JOIN_REQUEST_TTL_MS) continue;
+      this.state.pendingPlayerRequests.delete(request.userId);
+      this.recordJoinRequestResult(request, "expired", "request-timeout");
+      this.broadcast("joinRequestExpired", {
+        userId: request.userId,
+        requestId: request.requestId,
+        reason: "request-timeout",
+      });
+    }
+  }
+
+  private logJoinRequest(
+    event: string,
+    requestId: string,
+    userId: string,
+    reason?: string,
+  ) {
+    if (process.env.REALTIME_JOIN_REQUEST_LOGS !== "1") return;
+    console.info(JSON.stringify({
+      event: `join_request.${event}`,
+      roomId: this.roomId,
+      requestId,
+      userId,
+      ...(reason ? { reason } : {}),
+    }));
   }
 
   private latestJoinRequestResult(
