@@ -2,6 +2,13 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.9] - 2026-10-11
+
+### Security
+
+* Restrict read-only recovery access to closed rooms to known participants,
+  the host, and users with a recorded join-request outcome.
+
 ## [0.4.8] - 2026-10-11
 
 ### Fixed

@@ -255,6 +255,17 @@ export abstract class BaseGameRoom<
     this.liveSessions.add(client.sessionId);
 
     if (this.closed) {
+      const canRecoverClosedRoom =
+        identity.userId === this.state.hostUserId ||
+        Boolean(this.state.players.get(identity.userId)) ||
+        Boolean(this.state.spectators.get(identity.userId)) ||
+        [...this.state.joinRequestResults.values()].some(
+          (result) => result.userId === identity.userId,
+        );
+      if (!canRecoverClosedRoom) {
+        this.liveSessions.delete(client.sessionId);
+        throw new ServerError(4_012, "Room is closed");
+      }
       if (
         !this.state.players.get(identity.userId) &&
         !this.state.spectators.get(identity.userId)
