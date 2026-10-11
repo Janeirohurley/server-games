@@ -2,6 +2,13 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.8] - 2026-10-11
+
+### Fixed
+
+* Refuse to acknowledge durable lobby writes in production when persistence is
+  not configured, instead of treating memory-only mode as a successful write.
+
 ## [0.4.7] - 2026-10-11
 
 ### Fixed

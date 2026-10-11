@@ -73,7 +73,15 @@ class RoomSnapshotStore {
   async save(snapshot: PersistedRoomSnapshot): Promise<boolean> {
     // Memory-only mode is an intentional development/degraded mode; there
     // is no durable write to wait for in that case.
-    if (!this.enabled) return true;
+    if (!this.enabled) {
+      if (process.env.NODE_ENV === "production") {
+        console.error(
+          "[realtime] refusing durable lobby acknowledgement: DATABASE_URL is not configured",
+        );
+        return false;
+      }
+      return true;
+    }
     if (!(await this.init()) || !this.sql) return false;
     try {
       await this.sql`
