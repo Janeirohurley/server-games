@@ -12,11 +12,22 @@ the current lobby snapshot has been written successfully. A persistence error
 produces `joinRequestRegistrationFailed` so the client can retry without
 claiming that the request was accepted.
 
+Host decisions, requester cancellation, and server expiration are likewise
+written before the terminal state is published. A failed write preserves the
+pending request and emits `joinRequestDecisionFailed` to the actor. Decision
+and expiration mutations are serialized within a room to keep capacity checks
+and terminal outcomes consistent.
+
 The lifecycle is `pending → accepted | rejected | cancelled | expired`.
 Retries reuse the same identifier and return the existing registration instead of
 creating duplicates. Only the authenticated host can approve or reject a request,
 and an accepted request reserves a seat until its requester reconnects or the
 ten-minute approval window expires.
+
+Request and terminal timestamps use epoch milliseconds (`number`), so their
+ten-minute expiration remains correct across process restarts and cannot overflow
+the 32-bit schema range. A recent terminal result is restored on reconnect rather
+than being silently converted into a fresh request.
 
 ## Reconnection behavior
 

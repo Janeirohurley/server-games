@@ -2,6 +2,24 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.6] - 2026-10-11
+
+### Fixed
+
+* Store request and outcome timestamps as epoch-millisecond numbers instead of
+  clamping them to `uint32` or relying on a process-relative room clock.
+* Restore recent rejected/cancelled/expired outcomes after reconnect rather
+  than silently creating another request.
+
+## [0.4.5] - 2026-10-11
+
+### Fixed
+
+* Persist host approval/rejection, requester cancellation and expiration before
+  publishing terminal outcomes; failed writes leave requests recoverable.
+* Serialize decisions and expirations so simultaneous host actions cannot
+  exceed room capacity or contradict one another.
+
 ## [0.4.4] - 2026-10-10
 
 ### Fixed

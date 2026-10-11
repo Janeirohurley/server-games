@@ -118,6 +118,8 @@ export abstract class BaseGameRoom<
   private joinRequestSweep?: Delayed;
   /** Serializes retries while the first durable registration is in flight. */
   private joinRequestRegistrations = new Map<string, Promise<boolean>>();
+  /** Prevents concurrent host decisions from passing capacity checks together. */
+  private joinRequestMutationQueue: Promise<unknown> = Promise.resolve();
 
   /**
    * This room's chat. Every game inherits it — nothing below is
@@ -311,6 +313,19 @@ export abstract class BaseGameRoom<
         status: "pending",
         requestedAt: pendingRequest.requestedAt,
       });
+      this.sendChatSnapshot(client);
+      return;
+    }
+
+    const previousOutcome = this.latestJoinRequestResult(identity.userId);
+    if (
+      previousOutcome &&
+      previousOutcome.status !== "accepted" &&
+      Date.now() - previousOutcome.updatedAt < JOIN_REQUEST_TTL_MS
+    ) {
+      // A reconnect must restore the prior terminal result, not silently
+      // turn a rejected/expired request into a brand-new pending request.
+      // The player can explicitly submit a new request from the UI.
       this.sendChatSnapshot(client);
       return;
     }
@@ -635,7 +650,10 @@ export abstract class BaseGameRoom<
     if (!identity) return;
     // Guests are spectators by nature — the seat queue is not for them.
     if (identity.guest) {
-      client.send("joinRequestRejected", { reason: "guests-watch-only" });
+      client.send("joinRequestRejected", {
+        reason: "guests-watch-only",
+        requestId: message.requestId,
+      });
       return;
     }
 
@@ -653,11 +671,17 @@ export abstract class BaseGameRoom<
     // produce. Duplicate requests are harmless: one map entry keyed by
     // userId, always pointing at the newest ask.
     if (this.closed || this.started) {
-      client.send("joinRequestRejected", { reason: "room-unavailable" });
+      client.send("joinRequestRejected", {
+        reason: "room-unavailable",
+        requestId: message.requestId,
+      });
       return;
     }
     if (this.state.players.size + this.acceptedSeatReservations() >= this.state.targetPlayers) {
-      client.send("joinRequestRejected", { reason: "room-full" });
+      client.send("joinRequestRejected", {
+        reason: "room-full",
+        requestId: message.requestId,
+      });
       return;
     }
 
@@ -666,10 +690,19 @@ export abstract class BaseGameRoom<
 
   /** A requester withdraws their own pending request. */
   private handleCancelRequest(client: Client) {
+    return this.serializeJoinRequestMutation(() => this.applyCancelRequest(client));
+  }
+
+  private async applyCancelRequest(client: Client) {
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     const request = this.state.pendingPlayerRequests.get(identity.userId);
     if (!request) return;
+
+    if (!(await this.persistJoinRequestTransition(request, "cancelled", "requester-cancelled"))) {
+      this.sendJoinRequestDecisionFailure(client);
+      return;
+    }
 
     this.state.pendingPlayerRequests.delete(identity.userId);
     this.recordJoinRequestResult(request, "cancelled", "requester-cancelled");
@@ -682,6 +715,13 @@ export abstract class BaseGameRoom<
 
   /** Admin accepts a pending requester — all four checks of section 6. */
   private handleApproveJoin(
+    client: Client,
+    message: { userId?: string; requestId?: string },
+  ) {
+    return this.serializeJoinRequestMutation(() => this.applyApproveJoin(client, message));
+  }
+
+  private async applyApproveJoin(
     client: Client,
     message: { userId?: string; requestId?: string },
   ) {
@@ -711,6 +751,10 @@ export abstract class BaseGameRoom<
       name: request.name,
     };
     const requesterSession = this.sessionIdOfUser(userId);
+    if (!(await this.persistJoinRequestTransition(request, "accepted", "approved"))) {
+      this.sendJoinRequestDecisionFailure(client);
+      return;
+    }
     this.state.pendingPlayerRequests.delete(userId);
     this.recordJoinRequestResult(request, "accepted", "approved");
 
@@ -745,12 +789,24 @@ export abstract class BaseGameRoom<
     client: Client,
     message: { userId?: string; requestId?: string },
   ) {
+    return this.serializeJoinRequestMutation(() => this.applyRejectJoin(client, message));
+  }
+
+  private async applyRejectJoin(
+    client: Client,
+    message: { userId?: string; requestId?: string },
+  ) {
     if (!this.isAdmin(client.sessionId)) return;
 
     const userId = String(message?.userId ?? "");
     const request = this.state.pendingPlayerRequests.get(userId);
     if (!request) return;
     if (message?.requestId && message.requestId !== request.requestId) return;
+
+    if (!(await this.persistJoinRequestTransition(request, "rejected", "declined"))) {
+      this.sendJoinRequestDecisionFailure(client);
+      return;
+    }
 
     this.state.pendingPlayerRequests.delete(userId);
     this.recordJoinRequestResult(request, "rejected", "declined");
@@ -765,6 +821,10 @@ export abstract class BaseGameRoom<
 
   /** Admin closes the room — terminal, section 12. */
   private handleCloseRoom(client: Client) {
+    return this.serializeJoinRequestMutation(() => this.applyCloseRoom(client));
+  }
+
+  private applyCloseRoom(client: Client) {
     if (!this.isAdmin(client.sessionId)) return;
     if (this.closed) return;
 
@@ -1002,7 +1062,7 @@ export abstract class BaseGameRoom<
       requestId,
       identity.userId,
       identity.name,
-      Math.min(this.clock.currentTime, 4_294_967_295),
+      Date.now(),
     );
     const registration = this.persistAndPublishJoinRequest(request);
     this.joinRequestRegistrations.set(identity.userId, registration);
@@ -1055,6 +1115,46 @@ export abstract class BaseGameRoom<
     });
   }
 
+  private sendJoinRequestDecisionFailure(client: Client) {
+    client.send("joinRequestDecisionFailed", {
+      reason: "persistence-unavailable",
+    });
+  }
+
+  private serializeJoinRequestMutation<T>(operation: () => Promise<T> | T): Promise<T> {
+    const next = this.joinRequestMutationQueue.then(operation, operation);
+    this.joinRequestMutationQueue = next.then(
+      (): void => undefined,
+      (): void => undefined,
+    );
+    return next;
+  }
+
+  private persistJoinRequestTransition(
+    request: Pick<LobbyPendingRequestLike, "requestId" | "userId">,
+    status: "accepted" | "rejected" | "cancelled" | "expired",
+    reason: string,
+  ) {
+    const state = (this.state as unknown as {
+      toJSON(): Record<string, unknown>;
+    }).toJSON();
+    const pending = Object.fromEntries(snapshotEntries(state.pendingPlayerRequests));
+    delete pending[request.userId];
+    const results = Object.fromEntries(snapshotEntries(state.joinRequestResults));
+    results[request.requestId] = {
+      requestId: request.requestId,
+      userId: request.userId,
+      status,
+      updatedAt: Date.now(),
+      reason,
+    };
+    return this.persistLobbySnapshot({
+      ...state,
+      pendingPlayerRequests: pending,
+      joinRequestResults: results,
+    });
+  }
+
   private recordJoinRequestResult(
     request: LobbyPendingRequestLike,
     status: "accepted" | "rejected" | "cancelled" | "expired",
@@ -1064,7 +1164,7 @@ export abstract class BaseGameRoom<
     result.requestId = request.requestId;
     result.userId = request.userId;
     result.status = status;
-    result.updatedAt = Math.min(this.clock.currentTime, 4_294_967_295);
+    result.updatedAt = Date.now();
     result.reason = reason;
     this.state.joinRequestResults.set(request.requestId, result);
     this.logJoinRequest(status, request.requestId, request.userId, reason);
@@ -1082,11 +1182,18 @@ export abstract class BaseGameRoom<
   }
 
   private expirePendingJoinRequests() {
+    return this.serializeJoinRequestMutation(() => this.applyJoinRequestExpirations());
+  }
+
+  private async applyJoinRequestExpirations() {
     if (this.closed || this.started) return;
-    const now = this.clock.currentTime;
+    const now = Date.now();
     let changed = false;
     for (const request of [...this.state.pendingPlayerRequests.values()]) {
       if (now - request.requestedAt < JOIN_REQUEST_TTL_MS) continue;
+      if (!(await this.persistJoinRequestTransition(request, "expired", "request-timeout"))) {
+        continue;
+      }
       this.state.pendingPlayerRequests.delete(request.userId);
       this.recordJoinRequestResult(request, "expired", "request-timeout");
       changed = true;
@@ -1109,9 +1216,16 @@ export abstract class BaseGameRoom<
       ) {
         continue;
       }
+      if (!(await this.persistJoinRequestTransition(
+        { requestId: result.requestId, userId: result.userId },
+        "expired",
+        "approval-timeout",
+      ))) {
+        continue;
+      }
       result.status = "expired";
       result.reason = "approval-timeout";
-      result.updatedAt = Math.min(now, 4_294_967_295);
+      result.updatedAt = now;
       changed = true;
       this.logJoinRequest("expired", result.requestId, result.userId, result.reason);
       this.broadcast("joinRequestExpired", {
@@ -1488,7 +1602,7 @@ export abstract class BaseGameRoom<
       request.requestId = readString(entry.requestId, key);
       request.userId = readString(entry.userId, key);
       request.name = readString(entry.name, request.userId);
-      request.requestedAt = boundedUint32(entry.requestedAt, 0);
+      request.requestedAt = readNumber(entry.requestedAt, 0);
       state.pendingPlayerRequests.set(request.userId, request);
     }
 
@@ -1500,7 +1614,7 @@ export abstract class BaseGameRoom<
       result.requestId = readString(entry.requestId, key);
       result.userId = readString(entry.userId, "");
       result.status = readString(entry.status, "");
-      result.updatedAt = boundedUint32(entry.updatedAt, 0);
+      result.updatedAt = readNumber(entry.updatedAt, 0);
       result.reason = readString(entry.reason, "");
       state.joinRequestResults.set(result.requestId, result);
     }

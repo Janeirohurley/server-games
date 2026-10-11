@@ -200,6 +200,10 @@ describe("phantom reaping after the reconnection grace", () => {
       room.state.pendingPlayerRequests.get("user-b")?.requestId,
       requestId,
     );
+    assert.ok(
+      room.state.pendingPlayerRequests.get("user-b")!.requestedAt > 4_294_967_295,
+      "request timestamps retain the full epoch-millisecond value",
+    );
     assert.strictEqual(
       requested.filter((item) => item.requestId === requestId).length,
       1,
@@ -316,6 +320,158 @@ describe("phantom reaping after the reconnection grace", () => {
     } finally {
       roomSnapshotStore.save = originalSave;
     }
+  });
+
+  it("does not confirm a host decision until the terminal state is durable", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+    const requestId = "durable-decision-request-001";
+    bob.send("requestJoinAsPlayer", { requestId });
+    await tick();
+
+    const failures = collect<{ reason: string }>(alice, "joinRequestDecisionFailed");
+    const rejected = collect<{ requestId: string }>(alice, "joinRequestRejected");
+    const originalSave = roomSnapshotStore.save;
+    roomSnapshotStore.save = async () => false;
+    try {
+      alice.send("rejectJoin", { userId: "user-b", requestId });
+      await tick();
+      assert.strictEqual(
+        room.state.pendingPlayerRequests.get("user-b")?.requestId,
+        requestId,
+        "a failed durable decision leaves the request pending",
+      );
+      assert.strictEqual(room.state.joinRequestResults.has(requestId), false);
+      assert.strictEqual(rejected.length, 0, "the requester is not told it was rejected");
+      assert.strictEqual(failures[0]?.reason, "persistence-unavailable");
+    } finally {
+      roomSnapshotStore.save = originalSave;
+    }
+  });
+
+  it("persists an approval before seating and notifying the requester", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+    const requestId = "durable-approval-request-001";
+    bob.send("requestJoinAsPlayer", { requestId });
+    await tick();
+
+    const approvals = collect<{ requestId: string }>(bob, "joinRequestApproved");
+    let finishWrite!: (saved: boolean) => void;
+    const writeFinished = new Promise<boolean>((resolve) => {
+      finishWrite = resolve;
+    });
+    const originalSave = roomSnapshotStore.save;
+    roomSnapshotStore.save = async (snapshot) => {
+      const result = (snapshot.state.joinRequestResults as Record<string, { status?: string }>)[requestId];
+      assert.strictEqual(result?.status, "accepted");
+      return writeFinished;
+    };
+    try {
+      alice.send("approveJoin", { userId: "user-b", requestId });
+      await tick();
+      assert.strictEqual(room.state.pendingPlayerRequests.has("user-b"), true);
+      assert.strictEqual(room.state.joinRequestResults.has(requestId), false);
+      assert.strictEqual(room.state.players.has("user-b"), false);
+      assert.strictEqual(approvals.length, 0);
+      finishWrite(true);
+      await tick();
+      assert.strictEqual(room.state.pendingPlayerRequests.has("user-b"), false);
+      assert.strictEqual(room.state.joinRequestResults.get(requestId)?.status, "accepted");
+      assert.strictEqual(room.state.players.has("user-b"), true);
+      assert.strictEqual(approvals.length, 1);
+    } finally {
+      roomSnapshotStore.save = originalSave;
+    }
+  });
+
+  it("expires requests by wall-clock age and keeps them pending if persistence fails", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+    const requestId = "wall-clock-expiration-001";
+    bob.send("requestJoinAsPlayer", { requestId });
+    await tick();
+    const request = room.state.pendingPlayerRequests.get("user-b")!;
+    request.requestedAt = Date.now() - 11 * 60 * 1_000;
+
+    const originalSave = roomSnapshotStore.save;
+    const expire = room as unknown as {
+      expirePendingJoinRequests: () => Promise<void>;
+    };
+    roomSnapshotStore.save = async () => false;
+    try {
+      await expire.expirePendingJoinRequests();
+      assert.strictEqual(
+        room.state.pendingPlayerRequests.has("user-b"),
+        true,
+        "a failed expiration write does not remove the pending request",
+      );
+
+      roomSnapshotStore.save = async () => true;
+      await expire.expirePendingJoinRequests();
+      assert.strictEqual(room.state.pendingPlayerRequests.has("user-b"), false);
+      assert.strictEqual(room.state.joinRequestResults.get(requestId)?.status, "expired");
+      assert.ok(Date.now() - room.state.joinRequestResults.get(requestId)!.updatedAt < 5_000);
+    } finally {
+      roomSnapshotStore.save = originalSave;
+    }
+  });
+
+  it("restores a recent rejection instead of silently filing a new request", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+    const requestId = "rejection-reconnect-001";
+    bob.send("requestJoinAsPlayer", { requestId });
+    await tick();
+    alice.send("rejectJoin", { userId: "user-b", requestId });
+    await tick();
+    assert.strictEqual(room.state.joinRequestResults.get(requestId)?.status, "rejected");
+
+    await bob.leave();
+    await tick();
+    const bobAgain = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+    assert.strictEqual(room.state.pendingPlayerRequests.has("user-b"), false);
+    assert.strictEqual(room.state.joinRequestResults.get(requestId)?.status, "rejected");
+    void bobAgain;
   });
 
   it("keeps an approval authoritative while the requester is offline", async () => {

@@ -71,7 +71,7 @@ export const PendingRequestSchema = schema({
   /** Display name. */
   name: t.string(),
   /** Server clock timestamp (ms) of the request — display order. */
-  requestedAt: t.uint32(),
+  requestedAt: t.number().default(0),
 });
 
 export type PendingRequest = SchemaType<typeof PendingRequestSchema>;
@@ -81,7 +81,7 @@ export const JoinRequestResultSchema = schema({
   requestId: t.string(),
   userId: t.string(),
   status: t.string(),
-  updatedAt: t.uint32(),
+  updatedAt: t.number().default(0),
   reason: t.string().default(""),
 });
 
