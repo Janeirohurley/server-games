@@ -529,6 +529,12 @@ describe("phantom reaping after the reconnection grace", () => {
         recoveredRoom.state.joinRequestResults.get(requestId)?.reason,
         "room-closed",
       );
+      await assert.rejects(
+        colyseus.connectTo(recoveredRoom, {
+          token: await mintToken("unrelated-user", "Stranger"),
+        }),
+        /Room is closed/,
+      );
       void returningRequester;
     } finally {
       roomSnapshotStore.save = originalSave;
