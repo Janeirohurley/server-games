@@ -46,9 +46,11 @@ than being silently converted into a fresh request.
 Lobby rooms in `WAITING` or `READY`, and closed-room tombstones, are snapshotted
 to PostgreSQL in production when `DATABASE_URL` is configured. The snapshot
 contains the room identity, creation options, host identity, capacity, and
-authoritative join-request state. It is restored at server startup before normal
-room use, so pending requests remain recoverable after a process crash or Render
-restart, with the original room ID preserved for existing invitation links.
+authoritative join-request state. At process startup, the server awaits snapshot
+restoration in Colyseus' `beforeListen` hook; the transport does not accept
+connections until rooms are recovered. Pending requests therefore remain
+recoverable after a process crash or Render restart, with the original room ID
+preserved for existing invitation links.
 
 This persistence is deliberately limited to lobbies. An in-progress match is
 removed from the snapshot store and is not rehydrated, because restoring it
@@ -57,10 +59,11 @@ false state. A server restart during an active match therefore still requires a
 separate game-session recovery design.
 
 Development without persistence is memory-only and does not provide restart
-recovery. Production is fail-closed for request acknowledgements: if
-`DATABASE_URL` is missing or a durable write fails, the request is not confirmed
-as registered. The game server can continue running, but the client receives a
-retryable persistence error.
+recovery. Production requires `DATABASE_URL` and fails before opening its
+transport if it is absent, cannot be reached, or an existing snapshot cannot be
+restored. A database outage after startup leaves the process up, but affected
+request writes receive a retryable persistence error and are not acknowledged
+as registered.
 
 The opt-in PostgreSQL integration test requires a dedicated disposable database:
 

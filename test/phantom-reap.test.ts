@@ -403,6 +403,64 @@ describe("phantom reaping after the reconnection grace", () => {
     }
   });
 
+  it("serializes concurrent approvals at capacity and keeps one terminal decision", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const host = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    const carol = await colyseus.connectTo(room, {
+      token: await mintToken("user-c", "Carol"),
+      mode: "watch",
+    });
+    await tick();
+
+    const bobRequestId = "capacity-race-bob-001";
+    const carolRequestId = "capacity-race-carol-001";
+    const hostRejections = collect<{ reason: string }>(host, "joinRequestRejected");
+    const carolRejections = collect<{ requestId: string; reason: string }>(
+      carol,
+      "joinRequestRejected",
+    );
+    bob.send("requestJoinAsPlayer", { requestId: bobRequestId });
+    carol.send("requestJoinAsPlayer", { requestId: carolRequestId });
+    await tick();
+
+    // Both decisions enter the room's mutation queue before either durable
+    // write resolves. Only one may consume the final player slot.
+    host.send("approveJoin", { userId: "user-b", requestId: bobRequestId });
+    host.send("approveJoin", { userId: "user-c", requestId: carolRequestId });
+    await tick();
+
+    assert.strictEqual(room.state.players.size, 2);
+    assert.strictEqual(room.state.players.has("user-b"), true);
+    assert.strictEqual(room.state.players.has("user-c"), false);
+    assert.ok(
+      hostRejections.some((message) => message.reason === "room-full"),
+      "the other approval is explicitly rejected because capacity is full",
+    );
+    assert.strictEqual(room.state.pendingPlayerRequests.size, 1);
+
+    // For the still-pending request, a rejection followed by a late approval
+    // must not produce contradictory state or seat the requester.
+    assert.ok(room.state.pendingPlayerRequests.has("user-c"));
+    host.send("rejectJoin", { userId: "user-c", requestId: carolRequestId });
+    host.send("approveJoin", { userId: "user-c", requestId: carolRequestId });
+    await tick();
+    assert.strictEqual(room.state.joinRequestResults.get(carolRequestId)?.status, "rejected");
+    assert.strictEqual(room.state.players.has("user-c"), false);
+    assert.strictEqual(room.state.pendingPlayerRequests.has("user-c"), false);
+    assert.ok(
+      carolRejections.some((message) => message.requestId === carolRequestId),
+      "requester receives the winning terminal decision",
+    );
+  });
+
   it("expires requests by wall-clock age and keeps them pending if persistence fails", async () => {
     const room = (await colyseus.createRoom("ludo", {
       targetPlayers: 2,

@@ -13,6 +13,12 @@ import { roomSnapshotStore } from "./rooms/room-snapshot-store.js";
 // Import Colyseus config
 import app from "./app.config.js";
 
+// Restore persisted rooms before the transport starts accepting clients.
+const existingBeforeListen = app.options.beforeListen;
+app.options.beforeListen = async () => {
+  await existingBeforeListen?.();
+  await roomSnapshotStore.restoreRooms();
+};
+
 // Create and listen on 2567 (or PORT environment variable.)
 await listen(app);
-await roomSnapshotStore.restoreRooms();

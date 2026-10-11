@@ -116,7 +116,20 @@ class RoomSnapshotStore {
   }
 
   async loadAll(): Promise<PersistedRoomSnapshot[]> {
-    if (!(await this.init()) || !this.sql) return [];
+    if (!this.enabled) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error(
+          "DATABASE_URL is required for durable lobby snapshots in production",
+        );
+      }
+      return [];
+    }
+    if (!(await this.init()) || !this.sql) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error("Unable to initialize durable lobby storage during startup");
+      }
+      return [];
+    }
     try {
       await this.sql`
         DELETE FROM ${this.sql(TABLE)}
@@ -139,6 +152,11 @@ class RoomSnapshotStore {
       }));
     } catch (error) {
       console.warn("[realtime] room snapshot load failed:", error);
+      if (process.env.NODE_ENV === "production") {
+        throw new Error("Unable to load durable lobby snapshots during startup", {
+          cause: error,
+        });
+      }
       return [];
     }
   }
@@ -167,15 +185,23 @@ class RoomSnapshotStore {
 
   async restoreRooms() {
     const snapshots = await this.loadAll();
+    const failures: Array<{ roomId: string; error: unknown }> = [];
     for (const snapshot of snapshots) {
       try {
         await this.restoreSnapshot(snapshot);
       } catch (error) {
+        failures.push({ roomId: snapshot.roomId, error });
         console.warn(
           `[realtime] could not restore room ${snapshot.roomId}:`,
           error,
         );
       }
+    }
+    if (failures.length > 0 && process.env.NODE_ENV === "production") {
+      throw new AggregateError(
+        failures.map(({ error }) => error),
+        `Unable to restore ${failures.length} durable lobby room(s) before startup`,
+      );
     }
     if (snapshots.length > 0) {
       console.info(`[realtime] restored ${snapshots.length} lobby room(s)`);

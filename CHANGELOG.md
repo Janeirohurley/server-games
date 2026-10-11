@@ -2,6 +2,18 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.10] - 2026-10-11
+
+### Fixed
+
+* Restore persisted lobby rooms in Colyseus' `beforeListen` hook so invite
+  links are available before the server starts accepting connections.
+* Require `DATABASE_URL` in production so the server cannot accept traffic
+  without durable join-request recovery.
+* Fail startup instead of listening when configured durable snapshots cannot
+  be loaded or restored.
+* Cover concurrent approvals at room capacity and late contradictory decisions.
+
 ## [0.4.9] - 2026-10-11
 
 ### Security

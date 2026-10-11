@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "server-games",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "A Colyseus multiplayer server",
   "type": "module",
   "main": "build/index.js",

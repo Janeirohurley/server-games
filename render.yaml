@@ -32,9 +32,9 @@ services:
       # Render dashboard (Environment), never in this file.
       - key: REALTIME_TOKEN_SECRET
         sync: false
-      # PostgreSQL for the @colyseus/admin panel only. The panel creates
-      # its own `colyseus_*` tables on boot; games and matchmaking stay in
-      # memory. Unset => the server still boots, /admin is not mounted.
+      # Required for durable lobby/join-request snapshots and @colyseus/admin.
+      # The panel creates its own `colyseus_*` tables on boot. Set this to a
+      # managed PostgreSQL connection string in the Render dashboard.
       - key: DATABASE_URL
         sync: false
       # Signs the admin session cookies. @colyseus/admin refuses to boot
