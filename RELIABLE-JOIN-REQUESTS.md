@@ -23,6 +23,8 @@ Retries reuse the same identifier and return the existing registration instead o
 creating duplicates. Only the authenticated host can approve or reject a request,
 and an accepted request reserves a seat until its requester reconnects or the
 ten-minute approval window expires.
+Closed rooms are retained as read-only rooms for 24 hours. Pending requests are
+stored as `expired` with reason `room-closed`, then the tombstone is removed.
 
 Request and terminal timestamps use epoch milliseconds (`number`), so their
 ten-minute expiration remains correct across process restarts and cannot overflow
@@ -41,8 +43,8 @@ than being silently converted into a fresh request.
 
 ## Persistence boundary
 
-Lobby rooms in `WAITING` or `READY` are snapshotted to PostgreSQL when
-`NODE_ENV=production` and `DATABASE_URL` are configured. The snapshot contains
+Lobby rooms in `WAITING` or `READY`, and closed-room tombstones, are snapshotted
+to PostgreSQL when `NODE_ENV=production` and `DATABASE_URL` are configured. The snapshot contains
 the room identity, creation options, host identity, capacity, and authoritative
 join-request state. It is restored at server startup before normal room use, so
 pending requests remain recoverable after a process crash or Render restart,

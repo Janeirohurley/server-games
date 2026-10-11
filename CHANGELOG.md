@@ -2,6 +2,14 @@
 
 All notable changes to the Game Arena server are documented here.
 
+## [0.4.7] - 2026-10-11
+
+### Fixed
+
+* Persist closed-room outcomes and retain a read-only room for 24 hours so
+  disconnected requesters can recover the closure result after reconnect or
+  process restart.
+
 ## [0.4.6] - 2026-10-11
 
 ### Fixed

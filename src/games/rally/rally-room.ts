@@ -185,10 +185,10 @@ export class RallyRoom extends BaseGameRoom<RallyState> {
     return player.side === 1 ? 1 : 0;
   }
 
-  public override onDispose() {
+  public override async onDispose() {
     this.loop?.clear();
     this.match = undefined;
     this.sides.clear();
-    super.onDispose();
+    await super.onDispose();
   }
 }

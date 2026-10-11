@@ -350,10 +350,10 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.endTurn(player);
   }
 
-  public override onDispose() {
+  public override async onDispose() {
     this.turnTimeout?.clear();
     this.countdownTimer?.clear();
-    super.onDispose();
+    await super.onDispose();
   }
 
   /**

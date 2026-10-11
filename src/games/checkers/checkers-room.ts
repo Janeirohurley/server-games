@@ -163,9 +163,9 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
     }
   }
 
-  public override onDispose() {
+  public override async onDispose() {
     this.turnTimeout?.clear();
-    super.onDispose();
+    await super.onDispose();
   }
 
   // ------------------------------------------------------------------

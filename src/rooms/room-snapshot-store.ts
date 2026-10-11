@@ -4,6 +4,7 @@ import { matchMaker } from "colyseus";
 import { isDevMode, setDevMode } from "@colyseus/core";
 
 const TABLE = "game_room_snapshots";
+const CLOSED_ROOM_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1_000;
 
 export interface PersistedRoomSnapshot {
   roomId: string;
@@ -109,6 +110,11 @@ class RoomSnapshotStore {
   async loadAll(): Promise<PersistedRoomSnapshot[]> {
     if (!(await this.init()) || !this.sql) return [];
     try {
+      await this.sql`
+        DELETE FROM ${this.sql(TABLE)}
+        WHERE state->>'phase' = 'closed'
+          AND saved_at < ${Date.now() - CLOSED_ROOM_SNAPSHOT_TTL_MS}
+      `;
       const rows = await this.sql<{
         room_id: string;
         room_name: string;

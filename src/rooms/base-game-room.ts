@@ -33,6 +33,7 @@ import { reportMatchFinished, type ParticipantReport } from "../profile/profile-
 const RECONNECTION_GRACE_SECONDS = 30;
 const JOIN_REQUEST_TTL_MS = 10 * 60 * 1_000;
 const JOIN_REQUEST_SWEEP_MS = 30 * 1_000;
+const CLOSED_ROOM_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 /**
  * A dropped (browser gone, network cut) participant's record is kept
@@ -115,6 +116,8 @@ export abstract class BaseGameRoom<
   protected reconnectionGraceSeconds = RECONNECTION_GRACE_SECONDS;
   private started = false;
   private closed = false;
+  private closing = false;
+  private closedRetentionExpired = false;
   private joinRequestSweep?: Delayed;
   /** Serializes retries while the first durable registration is in flight. */
   private joinRequestRegistrations = new Map<string, Promise<boolean>>();
@@ -165,6 +168,10 @@ export abstract class BaseGameRoom<
     this.state.phase = LIFECYCLE.WAITING;
 
     this.restoreLobbyState(options.restoreState);
+    this.closed = this.state.phase === LIFECYCLE.CLOSED;
+    if (this.closed || this.closing) {
+      this.autoDispose = false;
+    }
 
     this.refreshMetadata();
 
@@ -199,6 +206,7 @@ export abstract class BaseGameRoom<
       () => this.expirePendingJoinRequests(),
       JOIN_REQUEST_SWEEP_MS,
     );
+    if (this.closed) this.scheduleClosedRoomCleanup();
   }
 
   /** Verify the platform JWT and remember the caller's identity. */
@@ -244,10 +252,19 @@ export abstract class BaseGameRoom<
     if (!identity) {
       throw new ServerError(4_003, "Not authenticated");
     }
-    if (this.closed) {
-      throw new ServerError(4_012, "Room is closed");
-    }
     this.liveSessions.add(client.sessionId);
+
+    if (this.closed) {
+      if (
+        !this.state.players.get(identity.userId) &&
+        !this.state.spectators.get(identity.userId)
+      ) {
+        this.addSpectator(identity, client.sessionId);
+      }
+      this.sendChatSnapshot(client);
+      if (this.closed) client.send("roomClosed", {});
+      return;
+    }
 
     const mode: JoinMode = options.mode === "watch" ? "watch" : "play";
 
@@ -578,10 +595,13 @@ export abstract class BaseGameRoom<
    * Release the room's chat. Games that override onDispose must call
    * `super.onDispose()` so the buffer is dropped with the room.
    */
-  public onDispose() {
+  public async onDispose() {
     this.joinRequestSweep?.clear();
     this.joinRequestSweep = undefined;
     this.chat.dispose();
+    if (this.closedRetentionExpired) {
+      await roomSnapshotStore.remove(this.roomId);
+    }
   }
 
   /** Delegated lifecycle message: admin asks to start. */
@@ -609,7 +629,7 @@ export abstract class BaseGameRoom<
     message: LobbySettingsInput | undefined,
   ) {
     if (!this.isAdmin(client.sessionId)) return;
-    if (this.started || this.closed) return;
+    if (this.started || this.closed || this.closing) return;
     if (
       this.state.phase !== LIFECYCLE.WAITING &&
       this.state.phase !== LIFECYCLE.READY
@@ -670,7 +690,7 @@ export abstract class BaseGameRoom<
     // notification — that is exactly what "il refait la demande" must
     // produce. Duplicate requests are harmless: one map entry keyed by
     // userId, always pointing at the newest ask.
-    if (this.closed || this.started) {
+    if (this.closed || this.closing || this.started) {
       client.send("joinRequestRejected", {
         reason: "room-unavailable",
         requestId: message.requestId,
@@ -824,25 +844,53 @@ export abstract class BaseGameRoom<
     return this.serializeJoinRequestMutation(() => this.applyCloseRoom(client));
   }
 
-  private applyCloseRoom(client: Client) {
+  private async applyCloseRoom(client: Client) {
     if (!this.isAdmin(client.sessionId)) return;
-    if (this.closed) return;
+    if (this.closed || this.closing) return;
+
+    this.closing = true;
+    const requests = [...this.state.pendingPlayerRequests.values()];
+    const current = (this.state as unknown as {
+      toJSON(): Record<string, unknown>;
+    }).toJSON();
+    const pending = Object.fromEntries(snapshotEntries(current.pendingPlayerRequests));
+    const results = Object.fromEntries(snapshotEntries(current.joinRequestResults));
+    const outcomes = requests.map((request) => ({
+      request,
+      updatedAt: Date.now(),
+    }));
+    for (const { request, updatedAt } of outcomes) {
+      delete pending[request.userId];
+      results[request.requestId] = {
+        requestId: request.requestId,
+        userId: request.userId,
+        status: "expired",
+        updatedAt,
+        reason: "room-closed",
+      };
+    }
+    if (!(await this.persistLobbySnapshot({
+      ...current,
+      phase: LIFECYCLE.CLOSED,
+      pendingPlayerRequests: pending,
+      joinRequestResults: results,
+    }))) {
+      this.sendJoinRequestDecisionFailure(client);
+      this.closing = false;
+      return;
+    }
 
     this.closed = true;
+    this.closing = false;
+    this.autoDispose = false;
     this.state.phase = LIFECYCLE.CLOSED;
-    for (const request of this.state.pendingPlayerRequests.values()) {
-      this.recordJoinRequestResult(request, "expired", "room-closed");
-    }
-    for (const request of [...this.state.pendingPlayerRequests.values()]) {
+    for (const { request, updatedAt } of outcomes) {
       this.state.pendingPlayerRequests.delete(request.userId);
+      this.recordJoinRequestResult(request, "expired", "room-closed", updatedAt);
     }
-    this.lock();
-    this.refreshMetadata();
+    this.refreshMetadata(false);
     this.broadcast("roomClosed", {});
-
-    // Everyone is told; give clients a moment to render the notice
-    // before their transport is torn down with the room.
-    this.delay(1_500, () => this.disconnect());
+    this.scheduleClosedRoomCleanup();
   }
 
   /** Participant record by session id (players or spectators). */
@@ -910,7 +958,7 @@ export abstract class BaseGameRoom<
    * always an explicit admin action — never automatic on capacity.
    */
   protected canStart(): boolean {
-    if (this.started || this.closed) return false;
+    if (this.started || this.closed || this.closing) return false;
     if (
       this.state.phase !== LIFECYCLE.WAITING &&
       this.state.phase !== LIFECYCLE.READY
@@ -1159,12 +1207,13 @@ export abstract class BaseGameRoom<
     request: LobbyPendingRequestLike,
     status: "accepted" | "rejected" | "cancelled" | "expired",
     reason: string,
+    updatedAt = Date.now(),
   ) {
     const result = new JoinRequestResultSchema();
     result.requestId = request.requestId;
     result.userId = request.userId;
     result.status = status;
-    result.updatedAt = Date.now();
+    result.updatedAt = updatedAt;
     result.reason = reason;
     this.state.joinRequestResults.set(request.requestId, result);
     this.logJoinRequest(status, request.requestId, request.userId, reason);
@@ -1519,7 +1568,8 @@ export abstract class BaseGameRoom<
   ): Promise<boolean> {
     if (
       this.state.phase === LIFECYCLE.WAITING ||
-      this.state.phase === LIFECYCLE.READY
+      this.state.phase === LIFECYCLE.READY ||
+      this.state.phase === LIFECYCLE.CLOSED
     ) {
       return roomSnapshotStore.save({
         roomId: this.roomId,
@@ -1536,6 +1586,14 @@ export abstract class BaseGameRoom<
       });
     }
     return roomSnapshotStore.remove(this.roomId).then(() => true);
+  }
+
+  private scheduleClosedRoomCleanup() {
+    this.delay(CLOSED_ROOM_RETENTION_MS, () => {
+      this.closedRetentionExpired = true;
+      this.autoDispose = true;
+      void this.disconnect();
+    });
   }
 
   private snapshotWithPendingRequest(

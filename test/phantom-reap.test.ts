@@ -474,6 +474,67 @@ describe("phantom reaping after the reconnection grace", () => {
     void bobAgain;
   });
 
+  it("durably closes pending requests and restores a read-only closed room", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    const bob = await colyseus.connectTo(room, {
+      token: await mintToken("user-b", "Bob"),
+      mode: "watch",
+    });
+    await tick();
+    const requestId = "close-room-pending-request-001";
+    bob.send("requestJoinAsPlayer", { requestId });
+    await tick();
+
+    let closedSnapshot: Parameters<typeof roomSnapshotStore.save>[0] | undefined;
+    const closeFailures = collect<{ reason: string }>(alice, "joinRequestDecisionFailed");
+    const originalSave = roomSnapshotStore.save;
+    try {
+      roomSnapshotStore.save = async () => false;
+      alice.send("closeRoom", {});
+      await tick();
+      assert.notStrictEqual(room.state.phase, "closed");
+      assert.strictEqual(room.state.pendingPlayerRequests.get("user-b")?.requestId, requestId);
+      assert.strictEqual(closeFailures[0]?.reason, "persistence-unavailable");
+
+      roomSnapshotStore.save = async (snapshot) => {
+        closedSnapshot = structuredClone(snapshot);
+        return true;
+      };
+      alice.send("closeRoom", {});
+      await tick();
+      assert.strictEqual(room.state.phase, "closed");
+      assert.strictEqual(room.state.pendingPlayerRequests.has("user-b"), false);
+      assert.strictEqual(room.state.joinRequestResults.get(requestId)?.status, "expired");
+      assert.strictEqual(room.state.joinRequestResults.get(requestId)?.reason, "room-closed");
+      assert.strictEqual(closedSnapshot?.state.phase, "closed");
+
+      const recovered = await roomSnapshotStore.restoreSnapshot({
+        ...closedSnapshot!,
+        roomId: "closed-room-recovery-001",
+        savedAt: Date.now(),
+      });
+      const recoveredRoom = colyseus.getRoomById<LudoRoom>(recovered.roomId);
+      const returningRequester = await colyseus.connectTo(recoveredRoom, {
+        token: await mintToken("user-b", "Bob"),
+      });
+      await tick();
+      assert.strictEqual(recovered.roomId, "closed-room-recovery-001");
+      assert.strictEqual(recoveredRoom.state.phase, "closed");
+      assert.strictEqual(
+        recoveredRoom.state.joinRequestResults.get(requestId)?.reason,
+        "room-closed",
+      );
+      void returningRequester;
+    } finally {
+      roomSnapshotStore.save = originalSave;
+    }
+  });
+
   it("keeps an approval authoritative while the requester is offline", async () => {
     const room = (await colyseus.createRoom("ludo", {
       targetPlayers: 2,
