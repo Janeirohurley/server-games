@@ -44,11 +44,11 @@ than being silently converted into a fresh request.
 ## Persistence boundary
 
 Lobby rooms in `WAITING` or `READY`, and closed-room tombstones, are snapshotted
-to PostgreSQL when `NODE_ENV=production` and `DATABASE_URL` are configured. The snapshot contains
-the room identity, creation options, host identity, capacity, and authoritative
-join-request state. It is restored at server startup before normal room use, so
-pending requests remain recoverable after a process crash or Render restart,
-with the original room ID preserved for existing invitation links.
+to PostgreSQL in production when `DATABASE_URL` is configured. The snapshot
+contains the room identity, creation options, host identity, capacity, and
+authoritative join-request state. It is restored at server startup before normal
+room use, so pending requests remain recoverable after a process crash or Render
+restart, with the original room ID preserved for existing invitation links.
 
 This persistence is deliberately limited to lobbies. An in-progress match is
 removed from the snapshot store and is not rehydrated, because restoring it
@@ -56,8 +56,24 @@ without its simulation timers and transient player connections would create a
 false state. A server restart during an active match therefore still requires a
 separate game-session recovery design.
 
-Development/tests can opt in with `REALTIME_ROOM_PERSISTENCE=1`. If the database
-is unavailable, the server continues in memory-only mode and logs the degraded
-guarantee. The current deployment assumes one authoritative game process (the
+Development without persistence is memory-only and does not provide restart
+recovery. Production is fail-closed for request acknowledgements: if
+`DATABASE_URL` is missing or a durable write fails, the request is not confirmed
+as registered. The game server can continue running, but the client receives a
+retryable persistence error.
+
+The opt-in PostgreSQL integration test requires a dedicated disposable database:
+
+```sh
+DATABASE_URL="$REALTIME_ROOM_TEST_DATABASE_URL" \
+REALTIME_ROOM_PERSISTENCE=1 \
+bunx mocha -r tsx -r test/test-server.ts \
+  test/room-snapshot-store.integration.test.ts --timeout 15000 --exit
+```
+
+Set `REALTIME_ROOM_TEST_DATABASE_URL` to the same connection string before
+running the command. The test writes a pending request, destroys the room, calls
+the startup restoration path, and verifies that the requester recovers the
+request. The current deployment assumes one authoritative game process (the
 normal Render service configuration); multi-process shared matchmaker/locking
 would need an additional deployment design.

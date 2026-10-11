@@ -71,8 +71,8 @@ class RoomSnapshotStore {
   }
 
   async save(snapshot: PersistedRoomSnapshot): Promise<boolean> {
-    // Memory-only mode is an intentional development/degraded mode; there
-    // is no durable write to wait for in that case.
+    // Memory-only mode is intentional during development. Production must
+    // never acknowledge a write that cannot survive a process restart.
     if (!this.enabled) {
       if (process.env.NODE_ENV === "production") {
         console.error(
