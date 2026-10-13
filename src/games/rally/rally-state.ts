@@ -36,6 +36,10 @@ export const RallyPlayerSchema = schema({
   /** Admin-imposed mute (base room `voice:admin-mute`): the target
    * cannot lift it themselves while set. */
   adminMuted: t.boolean().default(false),
+  /** Bot seat (no transport, never host, unranked). */
+  isBot: t.boolean().default(false),
+  /** Bot difficulty ("" for humans). */
+  botDifficulty: t.string().default(""),
   /** 0 = near side, 1 = far side. Assigned when the match starts. */
   side: t.uint8().default(0),
 });

@@ -48,6 +48,15 @@ export const LobbyPlayerSchema = schema({
   /** Admin-imposed mute (see base room `voice:admin-mute`). While set,
    * the player's own unmute requests are refused server-side. */
   adminMuted: t.boolean().default(false),
+  /**
+   * Seated by the platform's bot pool, not by a connected human. A bot
+   * holds a normal player seat (it competes, it is reported by userId)
+   * but has no transport, is never "reconnecting", never becomes host
+   * and its outcomes do not feed rankings.
+   */
+  isBot: t.boolean().default(false),
+  /** Difficulty label for a bot seat ("" for humans). */
+  botDifficulty: t.string().default(""),
 });
 
 export type LobbyPlayer = SchemaType<typeof LobbyPlayerSchema>;
@@ -138,6 +147,10 @@ export interface LobbyPlayerLike {
   connected: boolean;
   voiceMuted: boolean;
   adminMuted: boolean;
+  /** True for a bot seat (no transport, never host, unranked). */
+  isBot: boolean;
+  /** Bot difficulty ("" for humans). */
+  botDifficulty: string;
 }
 
 export interface LobbySpectatorLike {

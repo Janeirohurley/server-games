@@ -19,6 +19,8 @@ import {
 } from "./ludo-state.js";
 import type { LobbyPlayerLike } from "../../rooms/schema/lobby-state.js";
 import { LIFECYCLE } from "../../rooms/schema/lobby-state.js";
+import { LudoBotDriver } from "../../bots/brain/ludo-bot-driver.js";
+import type { BrainConfig } from "../../bots/brain/types.js";
 import {
   destinationOf,
   grantsExtraTurn,
@@ -69,6 +71,47 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
    */
   private trackCache?: LudoTrack;
 
+  /**
+   * Drives seated bots through their turns. The room owns the state and
+   * the two actions; the driver owns only the pacing and the decision
+   * (see ludo-bot-driver.ts). Every arrow reads live state at call time,
+   * so this can be built as a field initializer.
+   */
+  private readonly botDriver = new LudoBotDriver({
+    track: () => this.track,
+    isPlaying: () => this.state.phase === LIFECYCLE.PLAYING,
+    currentPlayer: () => {
+      const player = this.state.players.get(this.state.currentTurn);
+      return player
+        ? toBotSeat(player, this.hasBrain(player.userId), this.brainConfigFor(player.userId))
+        : undefined;
+    },
+    seatedPlayers: () =>
+      [...this.state.players.values()].map((player) =>
+        toBotSeat(player, this.hasBrain(player.userId), this.brainConfigFor(player.userId)),
+      ),
+    diceValue: () => this.state.diceValue,
+    legalMovesFor: (seat) => {
+      const player = this.state.players.get(seat.userId);
+      if (!player) return [];
+      return legalMoves(
+        this.track,
+        player.color as LudoColor,
+        snapshotPieces(player),
+        this.state.diceValue,
+      );
+    },
+    roll: (seat) => {
+      const player = this.state.players.get(seat.userId);
+      if (player) this.rollFor(player);
+    },
+    move: (seat, pieceIndex) => {
+      const player = this.state.players.get(seat.userId);
+      if (player) this.applyMove(player, pieceIndex);
+    },
+    schedule: (delayMs, fn) => this.clock.setTimeout(fn, delayMs),
+  });
+
   private get track(): LudoTrack {
     if (!this.trackCache) {
       this.trackCache = createTrack(this.state.targetPlayers);
@@ -118,6 +161,8 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       ludoPlayer.avatarUrl = lobbyPlayer.avatarUrl;
       ludoPlayer.voiceMuted = lobbyPlayer.voiceMuted;
       ludoPlayer.adminMuted = lobbyPlayer.adminMuted;
+      ludoPlayer.isBot = lobbyPlayer.isBot;
+      ludoPlayer.botDifficulty = lobbyPlayer.botDifficulty;
       ludoPlayer.color = track.colorAt(seatIndex);
       for (let pieceIndex = 0; pieceIndex < PIECES_PER_PLAYER; pieceIndex++) {
         const piece = new LudoPieceSchema();
@@ -163,6 +208,9 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
         this.onBeforeStart();
         if (!this.startMatch()) return;
         this.broadcast("gameStarted", {});
+        // Only now is the phase PLAYING, so a bot on the first seat can
+        // take its turn (the driver ignores turns outside a live match).
+        this.syncBots();
       },
       START_COUNTDOWN_SECONDS * 1000,
     );
@@ -172,6 +220,17 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
   private handleRollDice(client: Client) {
     const player = this.currentPlayerBySession(client.sessionId);
     if (!player) return;
+    this.rollFor(player);
+  }
+
+  /**
+   * Roll for `player` and resolve what follows — the server decides the
+   * value. Shared by the human `rollDice` intent and the bot driver, so a
+   * bot goes through exactly the same rules, broadcasts and turn handling
+   * as a human.
+   */
+  private rollFor(player: LudoPlayer) {
+    if (this.state.currentTurn !== player.userId) return;
     if (this.state.diceValue !== 0) return; // dice already rolled
 
     const value = 1 + Math.floor(Math.random() * 6);
@@ -206,6 +265,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
         // Nothing can move, but a 6 still grants another roll.
         this.state.diceValue = 0;
         this.refreshDeadline();
+        this.syncBots();
         return;
       }
       this.endTurn(player);
@@ -234,6 +294,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     }
 
     // Several options — wait for the player's choice.
+    this.syncBots();
   }
 
   /** Player commits a move; the server validates and applies it. */
@@ -344,6 +405,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
       }
       this.state.diceValue = 0; // same player rolls again
       this.refreshDeadline();
+      this.syncBots();
       return;
     }
 
@@ -351,6 +413,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
   }
 
   public override async onDispose() {
+    this.botDriver.dispose();
     this.turnTimeout?.clear();
     this.countdownTimer?.clear();
     await super.onDispose();
@@ -391,14 +454,40 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     return undefined;
   }
 
+  /**
+   * Let the bot driver react to a turn/dice change. A no-op when the
+   * current turn is a human's; the driver cancels any pending action.
+   */
+  private syncBots(): void {
+    this.botDriver.onTurnChanged();
+  }
+
+  /**
+   * Attach a brain to an already-seated account and start driving it. The
+   * account may be anything — a bot is only the case where it came from
+   * the pool. Errors silently when no such seat exists.
+   */
+  attachBrain(userId: string): void {
+    this.registerBrain(userId);
+    this.syncBots();
+  }
+
+  /**
+   * A brain just took over a seat (resolved on join). Nudge the driver so
+   * it starts playing immediately if it is already this seat's turn.
+   */
+  protected override onBrainAttached(_userId: string): void {
+    this.syncBots();
+  }
+
   private endTurn(player: LudoPlayer) {
     const roster = [...this.state.players.values()].sort(
       (a, b) => a.seat - b.seat,
     );
     const currentIndex = roster.findIndex((p) => p.userId === player.userId);
     let next = roster[(currentIndex + 1) % roster.length];
-    for (let step = 0; step < roster.length; step++) {
-      next = roster[(currentIndex + 1 + step) % roster.length];
+    for (let step = 1; step <= roster.length; step++) {
+      next = roster[(currentIndex + step) % roster.length];
       if (next && next.finished < PIECES_PER_PLAYER) break;
     }
 
@@ -407,6 +496,7 @@ export class LudoRoom extends BaseGameRoom<LudoState> {
     this.state.currentTurn = next?.userId ?? "";
     this.refreshDeadline();
     this.armTurnTimeout();
+    this.syncBots();
   }
 
   private forceSkipTurn() {
@@ -461,4 +551,20 @@ function snapshotPieces(player: LudoPlayer): RulePiece[] {
     index: piece.index,
     position: piece.position,
   }));
+}
+
+/** Plain-object view of a seat, for the bot driver (which stays Colyseus-free). */
+function toBotSeat(
+  player: LudoPlayer,
+  brainControlled: boolean,
+  brainConfig?: BrainConfig,
+) {
+  return {
+    userId: player.userId,
+    brainControlled,
+    botDifficulty: player.botDifficulty,
+    brainConfig,
+    color: player.color,
+    pieces: snapshotPieces(player),
+  };
 }

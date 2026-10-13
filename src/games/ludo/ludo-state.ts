@@ -263,6 +263,10 @@ const LudoPlayerSchemaFields = {
   /** Admin-imposed mute (base room `voice:admin-mute`): the target
    * cannot lift it themselves while set. */
   adminMuted: t.boolean().default(false),
+  /** Seated from the platform bot pool (no transport, never host). */
+  isBot: t.boolean().default(false),
+  /** Bot difficulty label ("" for humans). */
+  botDifficulty: t.string().default(""),
   /** Finished piece count, maintained by the room for cheap victory checks. */
   finished: t.uint8().default(0),
   pieces: t.array(LudoPieceSchema),

@@ -40,8 +40,14 @@ export interface ResolvedMove {
   destinationRing: number;
   /** Ring indexes of opponent pieces captured by this move. */
   captures: number[];
-  /** True when the piece reached the center. */
+  /** True when the move reaches the center. */
   finishes: boolean;
+  /** True when a 6 rolls the piece out of its base. */
+  releaseFromBase: boolean;
+  /** True when the destination is a safe ring cell (or off the ring). */
+  safe: boolean;
+  /** True when the destination enters the private home column. */
+  entersHome: boolean;
 }
 
 /**
@@ -81,14 +87,20 @@ export function legalMoves(
     if (piece.position === track.finishedPosition) continue;
     const destination = destinationOf(piece, dice, track.finishedPosition);
     if (destination === null) continue;
+    const destinationRing =
+      destination < track.homeColumnStart
+        ? track.ringIndexOf(color, destination)
+        : -1;
     moves.push({
       pieceIndex: piece.index,
       fromPosition: piece.position,
       toPosition: destination,
-      destinationRing:
-        destination < track.homeColumnStart ? track.ringIndexOf(color, destination) : -1,
+      destinationRing,
       captures: [],
       finishes: destination === track.finishedPosition,
+      releaseFromBase: piece.position === -1,
+      safe: destinationRing === -1 || track.isSafeCell(destinationRing),
+      entersHome: destinationRing === -1 && destination !== track.finishedPosition,
     });
   }
   return moves;

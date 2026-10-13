@@ -24,6 +24,13 @@ import type { GameDefinition } from "../games/registry.js";
 import { RoomChat, type RoomChatRequest } from "./room-chat.js";
 import { roomSnapshotStore } from "./room-snapshot-store.js";
 import { reportMatchFinished, type ParticipantReport } from "../profile/profile-reporting.js";
+import {
+  claimBots,
+  releaseBots,
+  resolveBrain,
+  type BrainConfig,
+  type ClaimedBot,
+} from "../bots/bot-client.js";
 
 /**
  * How long a dropped player's seat is held before it is released.
@@ -112,6 +119,21 @@ export abstract class BaseGameRoom<
    * by the same user may replace it instead of being refused.
    */
   private liveSessions = new Set<string>();
+  /**
+   * Bot seats leased from the platform pool, keyed by bot userId. A bot
+   * has no session and is never "dropped", so it is tracked separately
+   * from `players` bookkeeping: this set is what gets released back to
+   * the pool when the room closes or disposes.
+   */
+  private readonly botUserIds = new Set<string>();
+  /**
+   * Seats handed to a brain at runtime — ANY account, not just a pool
+   * bot. A brain is a controller, not an identity: this set records
+   * which seats it drives, independently of who the account is.
+   */
+  private readonly brainSeats = new Set<string>();
+  /** Strategy knobs per brain-driven seat, keyed by user id. */
+  private readonly brainConfigs = new Map<string, BrainConfig>();
   /** Per-room grace (constructor default; onCreate may narrow it). */
   protected reconnectionGraceSeconds = RECONNECTION_GRACE_SECONDS;
   private started = false;
@@ -134,6 +156,8 @@ export abstract class BaseGameRoom<
     options: {
       targetPlayers?: number;
       creatorUserId?: string;
+      /** How many platform bots the host asked to seat (0 = none). */
+      bots?: number;
       reconnectionGrace?: number;
       restoreRoomId?: string;
       restoreState?: unknown;
@@ -188,6 +212,22 @@ export abstract class BaseGameRoom<
     // is auto-approved as the first player).
     if (options.creatorUserId) {
       this.state.hostUserId = options.creatorUserId;
+    }
+
+    /*
+     * Seat the bots the host asked for. A restored room already carries
+     * its bot seats in the restored player map, so only a fresh room
+     * claims from the platform pool. One seat is always left for the
+     * human creator: a bot-only table has no one to start it.
+     */
+    if (!options.restoreState) {
+      const requestedBots = Math.trunc(Number(options.bots) || 0);
+      const maxBots = Math.max(
+        0,
+        Math.min(this.state.targetPlayers, def.maxPlayers) - 1,
+      );
+      const botCount = Math.min(requestedBots, maxBots);
+      if (botCount > 0) void this.seatRequestedBots(botCount);
     }
 
     /*
@@ -285,6 +325,7 @@ export abstract class BaseGameRoom<
       this.reclaimPlayerSeat(returning, client.sessionId);
       this.sendChatSnapshot(client);
       this.broadcast("playerReconnected", { userId: identity.userId });
+      void this.maybeAttachBrain(identity.userId);
       return;
     }
 
@@ -315,12 +356,22 @@ export abstract class BaseGameRoom<
     //    onCreate already registered them as admin, so their arrival is
     //    recognised by userId, not by connection order. Every other seat
     //    needs admin approval (section 5 of the spec).
+    // 4) Play mode: the creator's own first join is auto-approved —
+    //    onCreate already registered them as admin, so their arrival is
+    //    recognised by userId, not by connection order. Every other seat
+    //    needs admin approval (section 5 of the spec). Bots seated up
+    //    front do not count: they never take the host role, so the first
+    //    HUMAN arrival is still the auto-approved creator.
+    const humansSeated = [...this.state.players.values()].filter(
+      (player) => !player.isBot,
+    ).length;
     const isCreatorArrival =
-      this.state.players.size === 0 &&
+      humansSeated === 0 &&
       (!this.state.hostUserId || identity.userId === this.state.hostUserId);
     if (isCreatorArrival) {
       this.seatPlayer(identity, client.sessionId);
       this.sendChatSnapshot(client);
+      void this.maybeAttachBrain(identity.userId);
       return;
     }
 
@@ -329,6 +380,7 @@ export abstract class BaseGameRoom<
       this.seatPlayer(identity, client.sessionId);
       client.send("joinRequestApproved", acceptedRequest);
       this.sendChatSnapshot(client);
+      void this.maybeAttachBrain(identity.userId);
       return;
     }
 
@@ -607,6 +659,7 @@ export abstract class BaseGameRoom<
    * `super.onDispose()` so the buffer is dropped with the room.
    */
   public async onDispose() {
+    await this.releaseBotLeases();
     this.joinRequestSweep?.clear();
     this.joinRequestSweep = undefined;
     this.chat.dispose();
@@ -895,6 +948,10 @@ export abstract class BaseGameRoom<
     this.closing = false;
     this.autoDispose = false;
     this.state.phase = LIFECYCLE.CLOSED;
+    // A closed room must not hold bot leases for its whole retention
+    // window; free the pool now (best-effort — the platform's stale
+    // sweep is the backstop).
+    void this.releaseBotLeases();
     for (const { request, updatedAt } of outcomes) {
       this.state.pendingPlayerRequests.delete(request.userId);
       this.recordJoinRequestResult(request, "expired", "room-closed", updatedAt);
@@ -1034,7 +1091,9 @@ export abstract class BaseGameRoom<
   /**
    * Derive win/loss/draw for every seated player and hand the result
    * to the platform. Guests (no account) are skipped: they have no
-   * profile. Reporting failures never propagate to the room.
+   * profile. Bots are reported like any account — each holds a real
+   * gamer profile and earns the same stats, rating and XP a human seat
+   * does. Reporting failures never propagate.
    */
   private reportMatchOutcome(): void {
     const winnerUserId = this.state.winnerUserId;
@@ -1384,6 +1443,148 @@ export abstract class BaseGameRoom<
   }
 
   /**
+   * Seat a reserved bot. Bots bypass the join-request queue — the host
+   * approved them when the room was created. A bot holds a normal seat
+   * and counts toward readiness, but carries no session (nothing to
+   * reconnect) and never becomes host or leaves on its own.
+   */
+  private seatBot(bot: ClaimedBot): boolean {
+    if (this.state.players.get(bot.userId)) return false; // already seated
+    if (this.state.players.size >= this.state.maxPlayers) return false;
+
+    const seat = this.nextFreeSeat();
+    const player = this.createPlayerInstance();
+    player.userId = bot.userId;
+    player.name = bot.gamerTag || bot.displayName;
+    player.avatarUrl = "";
+    player.sessionId = "";
+    player.seat = seat;
+    player.connected = true; // a bot is always "present"
+    player.isBot = true;
+    player.botDifficulty = bot.difficulty;
+    this.brainConfigs.set(bot.userId, bot.config);
+    this.state.players.set(bot.userId, player);
+    this.botUserIds.add(bot.userId);
+    this.refreshReadiness();
+    return true;
+  }
+
+  /**
+   * Whether a brain drives this seat — a pool bot OR any account a brain
+   * was attached to. Account identity is irrelevant to the brain.
+   */
+  protected hasBrain(userId: string): boolean {
+    return this.botUserIds.has(userId) || this.brainSeats.has(userId);
+  }
+
+  /**
+   * Attach a brain to an already-seated account. From then on the seat is
+   * played like a bot seat, whatever the account is. A no-op when no such
+   * seat exists (the brain has nothing to drive). The optional difficulty
+   * is stamped on the seat so the driver reasons at the right level.
+   */
+  protected registerBrain(
+    userId: string,
+    difficulty?: string,
+    config?: BrainConfig,
+  ): void {
+    const seat = this.state.players.get(userId);
+    if (!seat) return;
+    if (difficulty) seat.botDifficulty = difficulty;
+    if (config) this.brainConfigs.set(userId, config);
+    this.brainSeats.add(userId);
+  }
+
+  /**
+   * Strategy knobs stored for a brain-driven seat, if any. Games read it
+   * when building the driver's view of a seat; absent means "balanced".
+   */
+  protected brainConfigFor(userId: string): BrainConfig | undefined {
+    return this.brainConfigs.get(userId);
+  }
+
+  /**
+   * Resolve whether an attached brain drives this account and, if so,
+   * start driving its seat. Fire-and-forget from onJoin: the platform may
+   * be slow or down and a join must never block on it — a missing answer
+   * simply means the human plays. Only `attached` brains resolve; pool
+   * bots are seated up front through `claimBots`.
+   */
+  protected async maybeAttachBrain(userId: string): Promise<void> {
+    if (this.hasBrain(userId)) return;
+    const brain = await resolveBrain({
+      gameId: this.state.gameId,
+      userId,
+    });
+    if (!brain) return;
+    // The room may have closed, or the seat vanished, while we waited.
+    if (this.closed || this.closing) return;
+    if (!this.state.players.get(userId)) return;
+    this.registerBrain(userId, brain.difficulty, brain.config);
+    this.onBrainAttached(userId);
+  }
+
+  /**
+   * Hook for a game room to react once a brain takes over a seat (e.g.
+   * nudge its driver). Default: nothing — games without a brain ignore it.
+   */
+  protected onBrainAttached(_userId: string): void {}
+
+  /**
+   * Claim and seat the host-requested bots. Called fire-and-forget from
+   * onCreate: the platform may be slow or down, and a room must never
+   * block on it. Whatever is granted is seated; the rest is simply not
+   * seated (the host can recreate the room).
+   */
+  private async seatRequestedBots(count: number): Promise<void> {
+    const claimed = await claimBots({
+      gameId: this.state.gameId,
+      count,
+      roomId: this.roomId,
+    });
+
+    // The room may have closed while the claim was in flight; a lease
+    // with no seat to hold it must go straight back to the pool.
+    if (this.closed || this.closing) {
+      if (claimed.length > 0) await this.releaseBotLeases();
+      return;
+    }
+
+    for (const bot of claimed) this.seatBot(bot);
+    console.info(
+      `[bots] seated ${claimed.length}/${count} for room ${this.roomId}`,
+    );
+
+    // Guardrail: the host asked for a full table, but the pool may have
+    // been exhausted (or the platform briefly unreachable). Leaving
+    // `targetPlayers` untouched would strand the room forever — starting
+    // requires every seat filled. Shrink the target by the shortfall so
+    // the humans already present can still start, never below the game
+    // minimum nor below the seats honestly filled.
+    const shortfall = count - claimed.length;
+    if (shortfall > 0) {
+      const floor = Math.max(this.state.minPlayers, this.state.players.size);
+      this.state.targetPlayers = Math.max(
+        floor,
+        this.state.targetPlayers - shortfall,
+      );
+      this.refreshReadiness();
+      this.refreshMetadata();
+      console.warn(
+        `[bots] room ${this.roomId} short ${shortfall} bot(s); target lowered to ${this.state.targetPlayers}`,
+      );
+    }
+  }
+
+  /** Return every bot seat this room holds to the platform pool. */
+  private async releaseBotLeases(): Promise<void> {
+    if (this.botUserIds.size === 0) return;
+    this.botUserIds.clear();
+    const released = await releaseBots({ roomId: this.roomId });
+    console.info(`[bots] released ${released} lease(s) for room ${this.roomId}`);
+  }
+
+  /**
    * Shared departure handling.
    *
    * Players keep their seat through a drop (reconnection grace, then the
@@ -1410,9 +1611,11 @@ export abstract class BaseGameRoom<
         // Admin left without closing: transfer to the most senior
         // remaining player so approval/keep-alive keeps working.
         if (this.state.hostUserId === userId) {
-          const nextAdmin = [...this.state.players.values()].sort(
-            (a, b) => a.seat - b.seat,
-          )[0];
+          // A bot is never host: hand the room to the most senior HUMAN
+          // left (a bot cannot approve joins or start the match).
+          const nextAdmin = [...this.state.players.values()]
+            .filter((candidate) => !candidate.isBot)
+            .sort((a, b) => a.seat - b.seat)[0];
           this.state.hostUserId = nextAdmin?.userId ?? "";
           if (nextAdmin) {
             this.broadcast("hostTransferred", { userId: nextAdmin.userId });
@@ -1518,9 +1721,11 @@ export abstract class BaseGameRoom<
         // Mirror the consented-leave path: a departed admin hands the
         // room to the most senior remaining player.
         if (this.state.hostUserId === userId) {
-          const nextAdmin = [...this.state.players.values()].sort(
-            (a, b) => a.seat - b.seat,
-          )[0];
+          // A bot is never host: hand the room to the most senior HUMAN
+          // left (a bot cannot approve joins or start the match).
+          const nextAdmin = [...this.state.players.values()]
+            .filter((candidate) => !candidate.isBot)
+            .sort((a, b) => a.seat - b.seat)[0];
           this.state.hostUserId = nextAdmin?.userId ?? "";
           if (nextAdmin) {
             this.broadcast("hostTransferred", { userId: nextAdmin.userId });
@@ -1567,7 +1772,11 @@ export abstract class BaseGameRoom<
       maxPlayers: this.state.maxPlayers,
       spectators: this.state.spectators.size,
       phase: this.state.phase,
-      playerIds: [...this.state.players.values()].map((p) => p.userId),
+      // Bots are excluded from presence: a bot is not a person to show
+      // "En ligne", and the platform has no profile surface for it.
+      playerIds: [...this.state.players.values()]
+        .filter((player) => !player.isBot)
+        .map((player) => player.userId),
       spectatorIds: [...this.state.spectators.values()].map((s) => s.userId),
     });
 
@@ -1657,10 +1866,16 @@ export abstract class BaseGameRoom<
       player.avatarUrl = readString(entry.avatarUrl, "");
       player.sessionId = "";
       player.seat = boundedUint8(entry.seat, 0);
-      player.connected = false;
       player.voiceMuted = readBoolean(entry.voiceMuted, true);
       player.adminMuted = readBoolean(entry.adminMuted, false);
+      player.isBot = readBoolean(entry.isBot, false);
+      player.botDifficulty = readString(entry.botDifficulty, "");
+      // A human's seat is held until they reconnect; a bot has no
+      // transport to reconnect, so it stays present across a restore —
+      // and its lease (keyed by the preserved roomId) is still valid.
+      player.connected = player.isBot;
       state.players.set(player.userId, player);
+      if (player.isBot) this.botUserIds.add(player.userId);
     }
 
     for (const request of [...state.pendingPlayerRequests.values()]) {

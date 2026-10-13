@@ -53,6 +53,10 @@ export const CheckersPlayerSchema = schema({
   /** Admin-imposed mute (base room `voice:admin-mute`): the target
    * cannot lift it themselves while set. */
   adminMuted: t.boolean().default(false),
+  /** Bot seat (no transport, never host, unranked). */
+  isBot: t.boolean().default(false),
+  /** Bot difficulty ("" for humans). */
+  botDifficulty: t.string().default(""),
   /** "white" or "black" — assigned from the seat when the match starts. */
   color: t.string().default(""),
 });

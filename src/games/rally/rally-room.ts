@@ -80,6 +80,8 @@ export class RallyRoom extends BaseGameRoom<RallyState> {
       player.sessionId = lobbyPlayer.sessionId;
       player.seat = lobbyPlayer.seat;
       player.connected = lobbyPlayer.connected;
+      player.isBot = lobbyPlayer.isBot;
+      player.botDifficulty = lobbyPlayer.botDifficulty;
       player.side = index === 0 ? 0 : 1;
       this.state.players.set(lobbyPlayer.userId, player);
       this.sides.set(player.side as Side, player.userId);

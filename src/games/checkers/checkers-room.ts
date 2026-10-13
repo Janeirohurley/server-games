@@ -85,6 +85,8 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
       player.seat = lobbyPlayer.seat;
       player.connected = lobbyPlayer.connected;
       player.avatarUrl = lobbyPlayer.avatarUrl;
+      player.isBot = lobbyPlayer.isBot;
+      player.botDifficulty = lobbyPlayer.botDifficulty;
       player.color = colorForSeat(index);
       this.state.players.set(lobbyPlayer.userId, player);
     });
