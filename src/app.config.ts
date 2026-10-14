@@ -16,6 +16,7 @@ import { MyRoom } from "./rooms/MyRoom.js";
 import { LudoRoom } from "./games/ludo/ludo-room.js";
 import { CheckersRoom } from "./games/checkers/checkers-room.js";
 import { RallyRoom } from "./games/rally/rally-room.js";
+import { TetrisRoom } from "./games/tetris/tetris-room.js";
 import { LIFECYCLE } from "./rooms/schema/lobby-state.js";
 import { getRealtimeTokenSecret } from "./auth/verify-token.js";
 import { admin } from "@colyseus/admin";
@@ -57,6 +58,7 @@ const server = defineServer({
     ludo: defineRoom(LudoRoom),
     checkers: defineRoom(CheckersRoom),
     rally: defineRoom(RallyRoom),
+    tetris: defineRoom(TetrisRoom),
   },
 
   /**

@@ -52,6 +52,13 @@ export const GAMES: readonly GameDefinition[] = [
     minPlayers: 2,
     maxPlayers: 2,
   },
+  {
+    id: "tetris",
+    name: "Tetris",
+    minPlayers: 2,
+    maxPlayers: 10,
+    allowedPlayerCounts: [2, 3, 4, 5, 6, 7, 8, 9, 10],
+  },
 ] as const;
 
 export function getGameDefinition(gameId: string): GameDefinition | undefined {
