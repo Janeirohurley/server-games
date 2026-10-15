@@ -76,6 +76,8 @@ export interface RallyOptions {
 /** What the renderer reads each frame. */
 export interface RallySnapshot {
   state: MatchState;
+  /** Current difficulty — the UI highlights the matching button. */
+  level: Difficulty;
   player: Paddle;
   cpu: Paddle;
   ball: Ball;
@@ -84,4 +86,34 @@ export interface RallySnapshot {
   best: number;
   server: Side;
   winner: Side | null;
+}
+
+/**
+ * Plain, JSON-safe snapshot of a whole match: enough to rebuild it exactly
+ * after a page reload. `serialize()` / `RallyMatch.restore()` are the two
+ * halves; the shape mirrors `RallyMatch`'s mutable fields one for one.
+ */
+export interface RallySave {
+  level: Difficulty;
+  state: MatchState;
+  player: Paddle;
+  cpu: Paddle;
+  ball: Ball;
+  targetX: number;
+  power: boolean;
+  opponentTarget: number;
+  opponentPower: boolean;
+  scores: [number, number];
+  rally: number;
+  best: number;
+  server: Side;
+  winner: Side | null;
+  now: number;
+  lastHitter: Side;
+  bounces: number;
+  serveOwn: boolean;
+  aiTarget: number;
+  aiReady: number;
+  nextServe: number;
+  beforePause: MatchState;
 }

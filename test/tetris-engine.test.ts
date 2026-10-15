@@ -3,14 +3,15 @@ import assert from "node:assert/strict";
 import {
   BOARD_HEIGHT,
   BOARD_WIDTH,
+  PIECE_SPAWN,
   applyInput,
   clearFullLines,
-  collides,
   createEmptyBoard,
   createGame,
-  drawBag,
+  drawPiece,
   getCells,
   getShape,
+  getStartMatrix,
   PIECE_TYPES,
   type Board,
   type Cell,
@@ -28,15 +29,68 @@ function boardWithRows(rows: number, gaps: number[] = []): Board {
   return board;
 }
 
-describe("sac de 7 pièces", () => {
-  it("contient chaque pièce exactement une fois", () => {
-    const [bag] = drawBag(42);
-    assert.deepEqual([...bag].sort(), [...PIECE_TYPES].sort());
+describe("tirage des pièces", () => {
+  it("est déterministe pour une même graine", () => {
+    assert.equal(drawPiece(7)[0], drawPiece(7)[0]);
+    assert.equal(drawPiece(7)[1], drawPiece(7)[1]);
   });
 
-  it("est déterministe pour une même graine", () => {
-    assert.deepEqual(drawBag(7)[0], drawBag(7)[0]);
-    assert.notDeepEqual(drawBag(7)[0], drawBag(8)[0]);
+  it("ne tire que des pièces connues et ne se bloque pas", () => {
+    let rng = 123;
+    for (let i = 0; i < 200; i++) {
+      const [piece, next] = drawPiece(rng);
+      assert.ok(PIECE_TYPES.includes(piece), `pièce inconnue : ${piece}`);
+      rng = next;
+    }
+  });
+
+  it("autorise deux fois la même pièce d'affilée (tirage uniforme, sans sac)", () => {
+    // Sur un tirage uniforme, on finit forcément par voir un doublon.
+    let rng = 1;
+    let previous = "";
+    let sawDouble = false;
+    for (let i = 0; i < 500 && !sawDouble; i++) {
+      const [piece, next] = drawPiece(rng);
+      if (piece === previous) sawDouble = true;
+      previous = piece;
+      rng = next;
+    }
+    assert.ok(sawDouble, "aucun doublon en 500 tirages : ce n'est pas un tirage uniforme");
+  });
+});
+
+describe("débris de départ", () => {
+  it("laisse le plateau vide sans lignes de départ", () => {
+    const { board } = getStartMatrix(0, 42);
+    assert.equal(board.flat().filter((c) => c !== 0).length, 0);
+  });
+
+  it("empile les débris en bas, jamais plus haut que demandé", () => {
+    for (const startLines of [3, 5, 10]) {
+      const { board } = getStartMatrix(startLines, 42);
+      const filledRows = board.filter((row) => row.some((c) => c !== 0)).length;
+      assert.equal(filledRows, startLines, `${startLines} lignes de débris`);
+      for (let y = 0; y < BOARD_HEIGHT - startLines; y++) {
+        assert.ok(board[y].every((c) => c === 0), `ligne ${y} doit rester vide`);
+      }
+      for (let y = BOARD_HEIGHT - startLines; y < BOARD_HEIGHT; y++) {
+        assert.ok(board[y].some((c) => c === 0), `ligne ${y} ne doit pas être pleine`);
+      }
+    }
+  });
+
+  it("donne le même plateau pour la même graine", () => {
+    assert.deepEqual(getStartMatrix(7, 99).board, getStartMatrix(7, 99).board);
+  });
+
+  it("crée une partie jouable avec des lignes de départ et un niveau", () => {
+    const game = createGame(1, 4, 6);
+    assert.equal(game.level, 4);
+    assert.equal(
+      game.board.filter((row) => row.some((c) => c !== 0)).length,
+      6,
+    );
+    assert.equal(game.status, "playing");
   });
 });
 
@@ -62,6 +116,18 @@ describe("rotation", () => {
     assert.equal(new Set(flat.map(([, y]) => y)).size, 1);
     assert.equal(new Set(upright.map(([x]) => x)).size, 1);
   });
+
+  it("refuse (sans kick) une rotation qui entre en collision", () => {
+    // I vertical coincé entre le mur gauche et une colonne posée.
+    const base = createGame(3);
+    const blocked: TetrisState = {
+      ...base,
+      board: boardWithRows(1, [9]),
+      current: { type: "I", rotation: 1, x: 9, y: BOARD_HEIGHT - 4 },
+    };
+    const rotated = applyInput(blocked, "rotate");
+    assert.equal(rotated, blocked, "la rotation impossible renvoie le même état");
+  });
 });
 
 describe("déplacements", () => {
@@ -78,13 +144,6 @@ describe("déplacements", () => {
     for (let i = 0; i < 20; i++) state = applyInput(state, "right");
     assert.ok(getCells(state.current).every(([x]) => x < BOARD_WIDTH));
   });
-
-  it("recule une rotation impossible contre le mur (kick) sans sortir", () => {
-    let state = createGame(3);
-    state = { ...state, current: { type: "I", rotation: 1, x: -1, y: 5 } };
-    const rotated = applyInput(state, "rotate");
-    assert.equal(collides(rotated.board, rotated.current), false);
-  });
 });
 
 describe("chute et pose", () => {
@@ -99,7 +158,7 @@ describe("chute et pose", () => {
     const after = applyInput(state, "hardDrop");
     const filled = after.board.flat().filter((c) => c !== 0).length;
     assert.equal(filled, 4);
-    assert.equal(after.current.y, -1, "la pièce suivante repart du haut");
+    assert.equal(after.current.y, PIECE_SPAWN[after.current.type].y, "la pièce suivante repart du haut");
     assert.equal(after.status, "playing");
   });
 
@@ -129,9 +188,8 @@ describe("lignes et score", () => {
     const state: TetrisState = {
       ...base,
       board: boardWithRows(4, [9]),
-      current: { type: "I", rotation: 1, x: 7, y: BOARD_HEIGHT - 4 },
+      current: { type: "I", rotation: 1, x: 9, y: BOARD_HEIGHT - 4 },
     };
-    // I vertical : sa colonne pleine est la 3e de la matrice 4x4 (x + 2 = 9).
     const after = applyInput(state, "hardDrop");
     assert.equal(after.lines, 4);
     assert.equal(after.score, 10 + 1500);
@@ -144,7 +202,7 @@ describe("lignes et score", () => {
       ...base,
       lines: 19,
       board: boardWithRows(1, [9]),
-      current: { type: "I", rotation: 1, x: 7, y: BOARD_HEIGHT - 4 },
+      current: { type: "I", rotation: 1, x: 9, y: BOARD_HEIGHT - 4 },
     };
     const after = applyInput(state, "hardDrop");
     assert.equal(after.lines, 20);
@@ -163,12 +221,13 @@ describe("lignes et score", () => {
 });
 
 describe("fin de partie", () => {
-  it("passe en `over` quand la pile bloque l'apparition", () => {
+  it("passe en `over` quand la ligne du haut est occupée après la pose", () => {
     const state: TetrisState = {
       ...createGame(9),
       board: boardWithRows(BOARD_HEIGHT, [0]),
     };
-    // Plateau plein partout sauf la colonne 0 : la pièce ne peut plus apparaître.
+    // Plateau plein partout sauf la colonne 0 : la pièce ne peut pas descendre
+    // et, en se posant, laisse la ligne du haut occupée.
     const after = applyInput(state, "hardDrop");
     assert.equal(after.status, "over");
   });

@@ -1,36 +1,35 @@
 import {
   clearFullLines,
   collides,
-  createEmptyBoard,
   dropDistance,
-  getShape,
+  getStartMatrix,
   lockPiece,
 } from "./board.js";
 import {
-  BOARD_WIDTH,
   CLEAR_POINTS,
-  KICK_OFFSETS,
   LINES_PER_LEVEL,
   MAX_LEVEL,
   MAX_SCORE,
+  PIECE_ORIGINS,
+  PIECE_SPAWN,
   QUEUE_MIN,
 } from "./constants.js";
-import { drawBag } from "./rng.js";
+import { drawPiece } from "./rng.js";
 import type { ActivePiece, PieceType, TetrisInput, TetrisState } from "./types.js";
 
-/** Pièce à son apparition : centrée, un cran au-dessus du plateau. */
+/** Pièce à son apparition : même position que `Block.xy` de l'original. */
 function spawn(type: PieceType): ActivePiece {
-  const size = getShape(type, 0).length;
-  return { type, rotation: 0, x: Math.floor((BOARD_WIDTH - size) / 2), y: -1 };
+  const { x, y } = PIECE_SPAWN[type];
+  return { type, rotation: 0, x, y };
 }
 
-/** Complète la file avec des sacs tant qu'il manque de pièces visibles. */
+/** Complète la file avec des tirages tant qu'il manque de pièces visibles. */
 function refillQueue(queue: PieceType[], rngState: number) {
   let q = queue;
   let rng = rngState;
   while (q.length < QUEUE_MIN + 1) {
-    const [bag, next] = drawBag(rng);
-    q = [...q, ...bag];
+    const [piece, next] = drawPiece(rng);
+    q = [...q, piece];
     rng = next;
   }
   return { queue: q, rngState: rng };
@@ -40,12 +39,17 @@ function refillQueue(queue: PieceType[], rngState: number) {
  * Crée une partie. `seed` fixe toute la suite de pièces : même graine,
  * même partie — c'est ce qui rendra le Tetris en ligne équitable.
  */
-export function createGame(seed: number, startLevel = 1): TetrisState {
+export function createGame(
+  seed: number,
+  startLevel = 1,
+  startLines = 0,
+): TetrisState {
   const level = Math.min(Math.max(Math.trunc(startLevel), 1), MAX_LEVEL);
-  const { queue, rngState } = refillQueue([], seed >>> 0);
+  const { board, rngState: afterMatrix } = getStartMatrix(startLines, seed >>> 0);
+  const { queue, rngState } = refillQueue([], afterMatrix);
   const [first, ...rest] = queue;
   return {
-    board: createEmptyBoard(),
+    board,
     current: spawn(first),
     queue: rest,
     rngState,
@@ -62,18 +66,22 @@ function tryMove(state: TetrisState, dx: number, dy: number): TetrisState {
   return collides(state.board, moved) ? state : { ...state, current: moved };
 }
 
+/**
+ * Rotation fidèle à l'original : la pièce est tournée puis décalée du pivot
+ * `PIECE_ORIGINS[type][rotation % n]`. Si le résultat entre en collision, la
+ * rotation est REFUSÉE — aucun « wall kick » n'est tenté.
+ */
 function tryRotate(state: TetrisState): TetrisState {
-  const rotation = (state.current.rotation + 1) % 4;
-  for (const [dx, dy] of KICK_OFFSETS) {
-    const candidate = {
-      ...state.current,
-      rotation,
-      x: state.current.x + dx,
-      y: state.current.y + dy,
-    };
-    if (!collides(state.board, candidate)) return { ...state, current: candidate };
-  }
-  return state;
+  const { type, rotation } = state.current;
+  const origins = PIECE_ORIGINS[type];
+  const [dx, dy] = origins[rotation % origins.length];
+  const candidate: ActivePiece = {
+    ...state.current,
+    rotation: (rotation + 1) % 4,
+    x: state.current.x + dx,
+    y: state.current.y + dy,
+  };
+  return collides(state.board, candidate) ? state : { ...state, current: candidate };
 }
 
 /**
@@ -99,6 +107,9 @@ function lockAndSpawn(state: TetrisState): TetrisState {
   const [nextType, ...rest] = queue;
   const current = spawn(nextType);
 
+  // Comme l'original : la partie se termine quand la ligne du HAUT est occupée.
+  const over = board[0].some((cell) => cell !== 0);
+
   return {
     ...state,
     board,
@@ -108,8 +119,7 @@ function lockAndSpawn(state: TetrisState): TetrisState {
     score,
     lines,
     level,
-    // Si la nouvelle pièce ne tient pas à son apparition, la pile a atteint le haut.
-    status: collides(board, current) ? "over" : "playing",
+    status: over ? "over" : "playing",
   };
 }
 

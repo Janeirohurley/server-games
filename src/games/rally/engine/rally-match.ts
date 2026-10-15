@@ -14,6 +14,7 @@ import type {
   PointReason,
   RallyEvent,
   RallyOptions,
+  RallySave,
   RallySnapshot,
   Side,
 } from "./types.js";
@@ -508,6 +509,7 @@ export class RallyMatch {
   public snapshot(): RallySnapshot {
     return {
       state: this.state,
+      level: this.level,
       player: { ...this.player },
       cpu: { ...this.cpu },
       ball: { ...this.ball },
@@ -517,5 +519,66 @@ export class RallyMatch {
       server: this.server,
       winner: this.winner,
     };
+  }
+
+  /** Plain, JSON-safe copy of the whole match — see `RallySave`. */
+  public serialize(): RallySave {
+    return {
+      level: this.level,
+      state: this.state,
+      player: { ...this.player },
+      cpu: { ...this.cpu },
+      ball: { ...this.ball },
+      targetX: this.targetX,
+      power: this.power,
+      opponentTarget: this.opponentTarget,
+      opponentPower: this.opponentPower,
+      scores: [this.scores[0], this.scores[1]],
+      rally: this.rally,
+      best: this.best,
+      server: this.server,
+      winner: this.winner,
+      now: this.now,
+      lastHitter: this.lastHitter,
+      bounces: this.bounces,
+      serveOwn: this.serveOwn,
+      aiTarget: this.aiTarget,
+      aiReady: this.aiReady,
+      nextServe: this.nextServe,
+      beforePause: this.beforePause,
+    };
+  }
+
+  /**
+   * Rebuilds a match saved with `serialize()`. Injected collaborators
+   * (`random`, `onEvent`, `opponentIsHuman`) are not part of the save and
+   * come from `options`, exactly as for a fresh match.
+   */
+  public static restore(save: RallySave, options: RallyOptions = {}): RallyMatch {
+    const match = new RallyMatch({ ...options, level: save.level });
+
+    match.state = save.state;
+    Object.assign(match.player, save.player);
+    Object.assign(match.cpu, save.cpu);
+    Object.assign(match.ball, save.ball);
+    match.targetX = save.targetX;
+    match.power = save.power;
+    match.opponentTarget = save.opponentTarget;
+    match.opponentPower = save.opponentPower;
+    match.scores = [save.scores[0], save.scores[1]];
+    match.rally = save.rally;
+    match.best = save.best;
+    match.server = save.server;
+    match.winner = save.winner;
+    match.now = save.now;
+    match.lastHitter = save.lastHitter;
+    match.bounces = save.bounces;
+    match.serveOwn = save.serveOwn;
+    match.aiTarget = save.aiTarget;
+    match.aiReady = save.aiReady;
+    match.nextServe = save.nextServe;
+    match.beforePause = save.beforePause;
+
+    return match;
   }
 }
