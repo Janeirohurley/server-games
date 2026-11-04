@@ -1035,10 +1035,16 @@ export abstract class BaseGameRoom<
     }
     return (
       this.state.players.size >= this.state.minPlayers &&
-      this.state.players.size >= this.state.targetPlayers
+      this.state.players.size >= this.requiredPlayersToStart()
     );
   }
-
+/**
+ * Seated players needed before the admin may start. Defalts to the 
+ * full table (Ludo, Checkers); a game may lower it to start part-full
+ */
+  protected requiredPlayersToStart(): number {
+    return this.state.targetPlayers;
+  }
   /** Move WAITING → READY (or back to WAITING when a seat frees up). */
   protected refreshReadiness() {
     if (this.started || this.closed) return;

@@ -56,6 +56,7 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
   state = new CheckersStateSchema();
 
   private turnTimeout?: Delayed;
+  private turnCountdown?: Delayed;
 
   constructor() {
     super();
@@ -167,6 +168,7 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
 
   public override async onDispose() {
     this.turnTimeout?.clear();
+    this.turnCountdown?.clear();
     await super.onDispose();
   }
 
@@ -201,7 +203,22 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
 
   private armTurnTimer() {
     this.state.turnDeadline = this.clock.currentTime + TURN_DURATION_MS;
+    this.state.turnSecondsLeft = TURN_DURATION_MS / 1_000;
+
     this.turnTimeout?.clear();
+    this.turnCountdown?.clear();
+
+    this.turnCountdown = this.clock.setInterval(() => {
+      const secondsLeft = Math.max(
+        0,
+        Math.ceil(
+          (this.state.turnDeadline - this.clock.currentTime) / 1_000,
+        ),
+      );
+
+      this.state.turnSecondsLeft = secondsLeft;
+    }, 250);
+
     this.turnTimeout = this.clock.setTimeout(
       () => this.handleTimeout(),
       TURN_DURATION_MS,
@@ -221,12 +238,14 @@ export class CheckersRoom extends BaseGameRoom<CheckersState> {
 
   private endMatch(winner: Color | null, reason: CheckersEndReason) {
     this.turnTimeout?.clear();
+    this.turnCountdown?.clear();
 
     this.state.outcome = winner ? "win" : "draw";
     this.state.outcomeReason = reason;
     this.state.winnerUserId = winner ? (this.userIdForColor(winner) ?? "") : "";
     this.state.currentTurn = "";
     this.state.turnDeadline = 0;
+    this.state.turnSecondsLeft = 0;
 
     this.finishMatch();
     this.broadcast("gameFinished", {

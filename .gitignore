@@ -3,6 +3,9 @@ build
 .colyseus-cloud.json
 .devmode.json
 
+# bun.lock is the lockfile of record; npm must not add a second one.
+package-lock.json
+
 # Environment files hold the shared realtime secret — never commit them.
 .env
 .env.*

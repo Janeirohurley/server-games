@@ -88,6 +88,7 @@ export const CheckersStateSchema = schema({
   currentTurn: t.string().default(""),
   /** Room-clock time (ms) the current turn expires. */
   turnDeadline: t.number().default(0),
+  turnSecondsLeft: t.uint8().default(0),
   /** Plies since the last capture or promotion; drives the draw rule. */
   idlePlies: t.uint8().default(0),
   /** "playing" | "win" | "draw". */
