@@ -47,6 +47,12 @@ export const GAMES: readonly GameDefinition[] = [
     maxPlayers: 2,
   },
   {
+    id: "chess",
+    name: "Chess",
+    minPlayers: 2,
+    maxPlayers: 2,
+  },
+  {
     id: "rally",
     name: "Rally",
     minPlayers: 2,

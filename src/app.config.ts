@@ -15,6 +15,7 @@ import {
 import { MyRoom } from "./rooms/MyRoom.js";
 import { LudoRoom } from "./games/ludo/ludo-room.js";
 import { CheckersRoom } from "./games/checkers/checkers-room.js";
+import { ChessRoom } from "./games/chess/chess-room.js";
 import { RallyRoom } from "./games/rally/rally-room.js";
 import { TetrisRoom } from "./games/tetris/tetris-room.js";
 import { LIFECYCLE } from "./rooms/schema/lobby-state.js";
@@ -57,6 +58,7 @@ const server = defineServer({
     my_room: defineRoom(MyRoom),
     ludo: defineRoom(LudoRoom),
     checkers: defineRoom(CheckersRoom),
+    chess: defineRoom(ChessRoom),
     rally: defineRoom(RallyRoom),
     tetris: defineRoom(TetrisRoom),
   },

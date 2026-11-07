@@ -35,6 +35,7 @@
     "@colyseus/database": "^0.18.4",
     "@colyseus/schema": "^5.0.14",
     "@colyseus/tools": "^0.18.1",
+    "chess.js": "^1.4.0",
     "colyseus": "^0.18.2",
     "express": "^5.2.1",
     "postgres": "^3.4.7"
