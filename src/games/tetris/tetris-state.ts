@@ -33,9 +33,9 @@ export const TetrisPlayerSchema = schema({
   voiceMuted: t.boolean().default(true),
   /** Mute imposé par l'admin : le joueur ne peut pas le lever lui-même. */
   adminMuted: t.boolean().default(false),
-  /** Siège piloté par un bot de la plateforme (aucun transport à écouter). */
+  /** Siège occupé par un bot (sans transport, jamais hôte, non classé). */
   isBot: t.boolean().default(false),
-  /** Niveau du bot ; "" pour un joueur humain. */
+  /** Difficulté du bot ("" pour un humain). */
   botDifficulty: t.string().default(""),
 
   // --- partie ---
