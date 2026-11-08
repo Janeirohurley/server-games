@@ -448,7 +448,17 @@ export abstract class BaseGameRoom<
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     this.markSessionDown(client.sessionId, identity.userId, "dropped");
-    this.allowReconnection(client, this.reconnectionGraceSeconds);
+    // `allowReconnection` returns a promise whose REJECTION is the normal
+    // outcome: it rejects with "expired" when the grace window elapses, and
+    // immediately with "not joined" when the socket died before the join
+    // handshake completed (a tab closed mid-load, a refresh during connect).
+    // Left unhandled, each of those printed a full Colyseus stack trace into
+    // the production logs on every departure, burying anything real. The
+    // departure itself is handled by onLeave, which fires either way — so
+    // there is nothing to do here but acknowledge the rejection.
+    this.allowReconnection(client, this.reconnectionGraceSeconds).catch(
+      () => undefined,
+    );
   }
 
   /** A dropped player made it back inside the grace window. */
