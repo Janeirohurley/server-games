@@ -142,6 +142,14 @@ export abstract class BaseGameRoom<
    * which seats it drives, independently of who the account is.
    */
   private readonly brainSeats = new Set<string>();
+  /**
+   * Bots the creator asked for, and how many are still being seated. The
+   * pool claim is asynchronous, so the creator can already be on the
+   * board while bots are still arriving — these counters drive the
+   * `seatState` events that tell clients the table is being prepared.
+   */
+  private botsRequested = 0;
+  private botsPending = 0;
   /** Strategy knobs per brain-driven seat, keyed by user id. */
   private readonly brainConfigs = new Map<string, BrainConfig>();
   /** Per-room grace (constructor default; onCreate may narrow it). */
@@ -267,7 +275,11 @@ export abstract class BaseGameRoom<
         Math.min(this.state.targetPlayers, def.maxPlayers) - 1,
       );
       const botCount = Math.min(requestedBots, maxBots);
-      if (botCount > 0) void this.seatRequestedBots(botCount);
+      if (botCount > 0) {
+        this.botsRequested = botCount;
+        this.botsPending = botCount;
+        void this.seatRequestedBots(botCount);
+      }
     }
 
     /*
@@ -334,6 +346,7 @@ export abstract class BaseGameRoom<
     }
     this.liveSessions.add(client.sessionId);
 
+<<<<<<< HEAD
     // A lobby revived from a durable snapshot is kept alive with
     // `autoDispose` off so its invite link survives the restart. Now that a
     // live client is here, the normal dispose-on-empty lifecycle resumes.
@@ -343,6 +356,12 @@ export abstract class BaseGameRoom<
     }
     // A live client is here: an empty-lobby keepalive is no longer needed.
     this.releaseWaitingLobbyKeepAlive();
+=======
+    // Tell the arriving client whether the table is still being prepared
+    // (platform bots being seated) so it can render the "préparation"
+    // state instead of an apparently empty board.
+    this.sendSeatState(client);
+>>>>>>> origin/develop
 
     if (this.closed) {
       const canRecoverClosedRoom =
@@ -481,11 +500,25 @@ export abstract class BaseGameRoom<
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     this.markSessionDown(client.sessionId, identity.userId, "dropped");
+<<<<<<< HEAD
     this.allowReconnection(client, this.reconnectionGraceSeconds);
     // If this was the last client of an un-started lobby, Colyseus would
     // dispose the room right after the grace and break every invite link.
     // Keep it reachable; the reaper reclaims it if nobody returns.
     this.keepWaitingLobbyAlive();
+=======
+    // `allowReconnection` returns a promise whose REJECTION is the normal
+    // outcome: it rejects with "expired" when the grace window elapses, and
+    // immediately with "not joined" when the socket died before the join
+    // handshake completed (a tab closed mid-load, a refresh during connect).
+    // Left unhandled, each of those printed a full Colyseus stack trace into
+    // the production logs on every departure, burying anything real. The
+    // departure itself is handled by onLeave, which fires either way — so
+    // there is nothing to do here but acknowledge the rejection.
+    this.allowReconnection(client, this.reconnectionGraceSeconds).catch(
+      () => undefined,
+    );
+>>>>>>> origin/develop
   }
 
   /** A dropped player made it back inside the grace window. */
@@ -584,6 +617,10 @@ export abstract class BaseGameRoom<
       // Deliberate leave via UI (section 10) — after double confirmation
       // client-side, so the server treats it as final.
       leaveRoom: (client: Client) => this.handleLeaveMessage(client),
+
+      // Bot-seating progress on demand: a freshly-created table may have
+      // missed the async `seatState` broadcasts, so it can ask directly.
+      querySeatState: (client: Client) => this.sendSeatState(client),
 
       // Voice: the LOGICAL mute state, for the roster UI. Only seated
       // players may ever set it; the server is the source of truth.
@@ -1600,7 +1637,30 @@ export abstract class BaseGameRoom<
    * block on it. Whatever is granted is seated; the rest is simply not
    * seated (the host can recreate the room).
    */
+  /** Snapshot of the bot-seating progress, for `seatState` events. */
+  private seatStatePayload() {
+    return {
+      requested: this.botsRequested,
+      pending: this.botsPending,
+      seated: this.botUserIds.size,
+    };
+  }
+
+  /** Push the current seating progress to one client. */
+  private sendSeatState(client: Client) {
+    client.send("seatState", this.seatStatePayload());
+  }
+
+  /** Push the current seating progress to everyone in the room. */
+  private broadcastSeatState() {
+    this.broadcast("seatState", this.seatStatePayload());
+  }
+
   private async seatRequestedBots(count: number): Promise<void> {
+    this.botsRequested = count;
+    this.botsPending = count;
+    this.broadcastSeatState();
+
     const claimed = await claimBots({
       gameId: this.state.gameId,
       count,
@@ -1611,13 +1671,23 @@ export abstract class BaseGameRoom<
     // with no seat to hold it must go straight back to the pool.
     if (this.closed || this.closing) {
       if (claimed.length > 0) await this.releaseBotLeases();
+      this.botsPending = 0;
       return;
     }
 
-    for (const bot of claimed) this.seatBot(bot);
+    for (const bot of claimed) {
+      if (this.seatBot(bot)) {
+        this.botsPending = Math.max(0, this.botsPending - 1);
+        this.broadcastSeatState();
+      }
+    }
     console.info(
       `[bots] seated ${claimed.length}/${count} for room ${this.roomId}`,
     );
+    // Whatever the outcome, seating is over: pending must reach 0 so the
+    // client stops "preparing" — a shortfall simply lowers the target.
+    this.botsPending = 0;
+    this.broadcastSeatState();
 
     // Guardrail: the host asked for a full table, but the pool may have
     // been exhausted (or the platform briefly unreachable). Leaving

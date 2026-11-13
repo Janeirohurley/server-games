@@ -4,6 +4,7 @@ import {
   PIECE_CELL_VALUE,
   PIECE_SHAPES,
 } from "./constants.js";
+import { nextRandom } from "./rng.js";
 import type { ActivePiece, Board, Cell, PieceType } from "./types.js";
 
 export function createEmptyBoard(): Board {
@@ -12,12 +13,71 @@ export function createEmptyBoard(): Board {
   );
 }
 
-/** Quart de tour horaire d'une matrice carrée. */
+/**
+ * Une ligne de « débris » : `count` cases allumées (count entre min et max),
+ * le reste en trous placés au hasard. Porté de `getLine()` de `getStartMatrix`
+ * (`chvin/react-tetris`, `unit/states.js`), mais le hasard vient de notre
+ * graine pour que la partie reste reproductible.
+ */
+function garbageLine(
+  min: number,
+  max: number,
+  rngState: number,
+): { line: Cell[]; rngState: number } {
+  let rng = rngState;
+  let draw = 0;
+  [draw, rng] = nextRandom(rng);
+  const count = Math.floor((max - min + 1) * draw) + min;
+
+  const line: Cell[] = [];
+  for (let i = 0; i < count; i++) line.push(PIECE_CELL_VALUE.I);
+  for (let blanks = BOARD_WIDTH - count; blanks > 0; blanks--) {
+    [draw, rng] = nextRandom(rng);
+    const index = Math.floor((line.length + 1) * draw);
+    line.splice(index, 0, 0);
+  }
+  return { line, rngState: rng };
+}
+
+/**
+ * Plateau de départ quand on a choisi des lignes de débris (`startLines`,
+ * 0 a 10) : les lignes sont empilées en bas du plateau, les plus hautes ayant
+ * le plus de trous. Porté de `getStartMatrix` de l'original — les trois
+ * premières lignes du bloc ont 5 a 8 cases, les suivantes 4 a 9, les toutes
+ * dernières 3 a 9. `rngState` avance au passage.
+ */
+export function getStartMatrix(
+  startLines: number,
+  rngState: number,
+): { board: Board; rngState: number } {
+  const board = createEmptyBoard();
+  const rows = Math.min(Math.max(Math.trunc(startLines), 0), BOARD_HEIGHT);
+  let rng = rngState;
+
+  for (let i = 0; i < rows; i++) {
+    const [min, max] = i <= 2 ? [5, 8] : i <= 6 ? [4, 9] : [3, 9];
+    const { line, rngState: next } = garbageLine(min, max, rng);
+    board[BOARD_HEIGHT - rows + i] = line;
+    rng = next;
+  }
+  return { board, rngState: rng };
+}
+
+/**
+ * Quart de tour d'une matrice RECTANGULAIRE, copié de `Block.rotate()`
+ * (`chvin/react-tetris`, `unit/block.js`). On empile chaque colonne d'origine
+ * à l'envers : le résultat fait largeur x hauteur.
+ */
 function rotateMatrix(matrix: number[][]): number[][] {
-  const size = matrix.length;
-  return matrix.map((_, row) =>
-    matrix.map((__, col) => matrix[size - 1 - col][row]),
+  const result: number[][] = [];
+  matrix.forEach((row) =>
+    row.forEach((value, column) => {
+      const index = row.length - column - 1;
+      if (result[index] === undefined) result[index] = [];
+      result[index].push(value);
+    }),
   );
+  return result;
 }
 
 /** Matrice d'une pièce pour une rotation donnée (0..3). */

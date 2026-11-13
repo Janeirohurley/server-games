@@ -49,7 +49,17 @@ export interface ResolvedBrain {
 }
 
 const DEFAULT_PLATFORM_URL = "http://localhost:3000";
-const REQUEST_TIMEOUT_MS = 5_000;
+/*
+ * The platform's claim path talks to Postgres over the same WAN as the
+ * rest of the app: minting identities against a cold Supabase pooler
+ * takes 10s+. Bot seating is fire-and-forget, so a generous timeout beats
+ * aborting a claim that would have succeeded. Override with
+ * BOT_POOL_TIMEOUT_MS.
+ */
+const REQUEST_TIMEOUT_MS = Math.max(
+  1_000,
+  Number(process.env.BOT_POOL_TIMEOUT_MS) || 20_000,
+);
 const MAX_ATTEMPTS = 3;
 
 function platformBaseUrl(): string {

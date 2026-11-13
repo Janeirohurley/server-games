@@ -5,48 +5,75 @@ export const BOARD_HEIGHT = 20;
 export const QUEUE_MIN = 5;
 
 /**
- * Formes de départ. Matrices carrées pour que la rotation reste un simple
- * quart de tour autour du centre (I : 4x4, O : 2x2, le reste : 3x3).
- * Le Tetris d'origine (chvin/react-tetris) utilisait des matrices rectangulaires
- * avec une table de « pivots » par pièce ; on préfère des matrices carrées,
- * plus simples à tester et à dupliquer côté serveur.
+ * Formes de départ, copiées telles quelles de `chvin/react-tetris`
+ * (`blockShape` dans `unit/const.js`). Ce sont des matrices RECTANGULAIRES :
+ * la rotation n'est donc pas un quart de tour autour d'un centre carré, mais
+ * une rotation suivie d'un décalage de pivot propre à la pièce (voir
+ * `PIECE_ORIGINS`). On reproduit volontairement l'original au pixel près.
  */
 export const PIECE_SHAPES: Record<PieceType, number[][]> = {
-  I: [
-    [0, 0, 0, 0],
-    [1, 1, 1, 1],
-    [0, 0, 0, 0],
-    [0, 0, 0, 0],
+  I: [[1, 1, 1, 1]],
+  L: [
+    [0, 0, 1],
+    [1, 1, 1],
   ],
   J: [
     [1, 0, 0],
     [1, 1, 1],
-    [0, 0, 0],
   ],
-  L: [
-    [0, 0, 1],
-    [1, 1, 1],
-    [0, 0, 0],
+  Z: [
+    [1, 1, 0],
+    [0, 1, 1],
+  ],
+  S: [
+    [0, 1, 1],
+    [1, 1, 0],
   ],
   O: [
     [1, 1],
     [1, 1],
   ],
-  S: [
-    [0, 1, 1],
-    [1, 1, 0],
-    [0, 0, 0],
-  ],
   T: [
     [0, 1, 0],
     [1, 1, 1],
-    [0, 0, 0],
   ],
-  Z: [
-    [1, 1, 0],
-    [0, 1, 1],
-    [0, 0, 0],
+};
+
+/**
+ * Table de pivots de l'original (`origin` dans `unit/const.js`). À chaque
+ * rotation, on décale la pièce de `PIECE_ORIGINS[type][rotation % taille]`
+ * avant de tester la collision. Comme dans l'original, une rotation qui
+ * entre en collision est REFUSÉE (aucun « wall kick »).
+ *
+ * `I` et `T` ont plusieurs entrées ; les autres n'en ont qu'une (pivot fixe).
+ */
+export const PIECE_ORIGINS: Record<PieceType, ReadonlyArray<readonly [number, number]>> = {
+  I: [
+    [-1, 1],
+    [1, -1],
   ],
+  J: [[0, 0]],
+  L: [[0, 0]],
+  O: [[0, 0]],
+  S: [[0, 0]],
+  T: [
+    [0, 0],
+    [1, 0],
+    [-1, 1],
+    [0, -1],
+  ],
+  Z: [[0, 0]],
+};
+
+/** Position d'apparition (coin haut-gauche de la matrice) par pièce, comme `Block.xy`. */
+export const PIECE_SPAWN: Record<PieceType, { x: number; y: number }> = {
+  I: { x: 3, y: 0 },
+  J: { x: 4, y: -1 },
+  L: { x: 4, y: -1 },
+  O: { x: 4, y: -1 },
+  S: { x: 4, y: -1 },
+  T: { x: 4, y: -1 },
+  Z: { x: 4, y: -1 },
 };
 
 export const PIECE_TYPES: PieceType[] = ["I", "J", "L", "O", "S", "T", "Z"];
@@ -75,17 +102,3 @@ export const CLEAR_POINTS = [100, 300, 700, 1500] as const;
 export const LINES_PER_LEVEL = 20;
 export const MAX_LEVEL = FALL_DELAYS_MS.length;
 export const MAX_SCORE = 999_999;
-
-/**
- * Décalages tentés quand une rotation entre en collision (« wall kick »
- * simplifié, identique pour toutes les pièces) : on essaie sur place, puis
- * on pousse la pièce d'une ou deux cases de chaque côté, puis vers le haut.
- */
-export const KICK_OFFSETS: ReadonlyArray<readonly [number, number]> = [
-  [0, 0],
-  [-1, 0],
-  [1, 0],
-  [-2, 0],
-  [2, 0],
-  [0, -1],
-];
