@@ -22,7 +22,7 @@ import {
 import type { RealtimeIdentity } from "../auth/verify-token.js";
 import type { GameDefinition } from "../games/registry.js";
 import { RoomChat, type RoomChatRequest } from "./room-chat.js";
-import { roomSnapshotStore } from "./room-snapshot-store.js";
+import { roomSnapshotStore, SNAPSHOT_TTL_MS } from "./room-snapshot-store.js";
 import { reportMatchFinished, type ParticipantReport } from "../profile/profile-reporting.js";
 import {
   claimBots,
@@ -41,6 +41,16 @@ const RECONNECTION_GRACE_SECONDS = 30;
 const JOIN_REQUEST_TTL_MS = 10 * 60 * 1_000;
 const JOIN_REQUEST_SWEEP_MS = 30 * 1_000;
 const CLOSED_ROOM_RETENTION_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * How long an un-started lobby is kept in memory after its LAST client
+ * drops (tab closed, laptop asleep, network cut). Colyseus' own
+ * auto-dispose tears the room down ~1 s after the reconnection window,
+ * which kills every invite link minted before the drop. We take over that
+ * decision: the lobby survives its clients, and is only reclaimed once
+ * this window elapses with nobody back.
+ */
+export const WAITING_LOBBY_KEEPALIVE_MS = 30 * 60 * 1_000;
 
 /**
  * A dropped (browser gone, network cut) participant's record is kept
@@ -140,6 +150,19 @@ export abstract class BaseGameRoom<
   private closed = false;
   private closing = false;
   private closedRetentionExpired = false;
+  /**
+   * A lobby revived from a durable snapshot is kept alive with
+   * `autoDispose` off so its invite link survives the restart; the first
+   * live join hands the normal dispose-on-empty lifecycle back.
+   */
+  private revivedFromSnapshot = false;
+  /**
+   * A waiting lobby whose last client dropped is kept alive past the
+   * reconnection window so pre-shared invite links keep working. The
+   * reaper reclaims the room (and its snapshot) if nobody comes back.
+   */
+  private keptAliveWithoutClients = false;
+  private keepAliveReaper?: Delayed;
   private joinRequestSweep?: Delayed;
   /** Serializes retries while the first durable registration is in flight. */
   private joinRequestRegistrations = new Map<string, Promise<boolean>>();
@@ -195,6 +218,23 @@ export abstract class BaseGameRoom<
     this.closed = this.state.phase === LIFECYCLE.CLOSED;
     if (this.closed || this.closing) {
       this.autoDispose = false;
+    } else if (options.restoreState) {
+      // A lobby revived from a durable snapshot has no live client yet, so
+      // Colyseus' seat-reservation timer would auto-dispose it ~15 s after
+      // boot — killing every invite link minted before the restart even
+      // though the snapshot is still valid. Keep it alive; `onJoin` hands the
+      // normal dispose-on-empty lifecycle back as soon as a client arrives.
+      // The TTL callback only reaps a lobby that stayed empty the whole
+      // snapshot window (a room with no live client never triggers onLeave).
+      this.revivedFromSnapshot = true;
+      this.autoDispose = false;
+      this.clock.setTimeout(() => {
+        if (this.clients.length === 0) {
+          void roomSnapshotStore
+            .remove(this.roomId)
+            .then(() => this.disconnect());
+        }
+      }, SNAPSHOT_TTL_MS);
     }
 
     this.refreshMetadata();
@@ -293,6 +333,16 @@ export abstract class BaseGameRoom<
       throw new ServerError(4_003, "Not authenticated");
     }
     this.liveSessions.add(client.sessionId);
+
+    // A lobby revived from a durable snapshot is kept alive with
+    // `autoDispose` off so its invite link survives the restart. Now that a
+    // live client is here, the normal dispose-on-empty lifecycle resumes.
+    if (this.revivedFromSnapshot) {
+      this.revivedFromSnapshot = false;
+      this.autoDispose = true;
+    }
+    // A live client is here: an empty-lobby keepalive is no longer needed.
+    this.releaseWaitingLobbyKeepAlive();
 
     if (this.closed) {
       const canRecoverClosedRoom =
@@ -432,12 +482,17 @@ export abstract class BaseGameRoom<
     if (!identity) return;
     this.markSessionDown(client.sessionId, identity.userId, "dropped");
     this.allowReconnection(client, this.reconnectionGraceSeconds);
+    // If this was the last client of an un-started lobby, Colyseus would
+    // dispose the room right after the grace and break every invite link.
+    // Keep it reachable; the reaper reclaims it if nobody returns.
+    this.keepWaitingLobbyAlive();
   }
 
   /** A dropped player made it back inside the grace window. */
   public onReconnect(client: Client) {
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
+    this.releaseWaitingLobbyKeepAlive();
 
     const player = this.state.players.get(identity.userId);
     if (player) {
@@ -660,6 +715,8 @@ export abstract class BaseGameRoom<
    */
   public async onDispose() {
     await this.releaseBotLeases();
+    this.keepAliveReaper?.clear();
+    this.keepAliveReaper = undefined;
     this.joinRequestSweep?.clear();
     this.joinRequestSweep = undefined;
     this.chat.dispose();
@@ -1063,6 +1120,7 @@ export abstract class BaseGameRoom<
    */
   protected startMatch(): boolean {
     if (!this.canStart()) return false;
+    this.releaseWaitingLobbyKeepAlive();
     this.started = true;
     this.state.phase = LIFECYCLE.PLAYING;
     this.matchStartedAt = Date.now();
@@ -1792,6 +1850,19 @@ export abstract class BaseGameRoom<
   private persistLobbySnapshot(
     stateOverride?: Record<string, unknown>,
   ): Promise<boolean> {
+    // A table with no seated human cannot be started, and with no pending
+    // request there is nothing left to recover either. Persisting it would
+    // restore an unstartable ghost on the next boot, and since that room
+    // never gets a live client it never auto-disposes. A lobby that still
+    // holds a join request is different: the requester's invite link must
+    // keep working, and the first human to arrive becomes the host.
+    const hasHumanPlayer = [...this.state.players.values()].some(
+      (player) => !player.isBot,
+    );
+    const hasPendingRequest = this.state.pendingPlayerRequests.size > 0;
+    if (!hasHumanPlayer && !hasPendingRequest) {
+      return roomSnapshotStore.remove(this.roomId).then(() => true);
+    }
     if (
       this.state.phase === LIFECYCLE.WAITING ||
       this.state.phase === LIFECYCLE.READY ||
@@ -1814,7 +1885,59 @@ export abstract class BaseGameRoom<
     return roomSnapshotStore.remove(this.roomId).then(() => true);
   }
 
+  /**
+   * Suspend Colyseus' dispose-on-empty for an un-started lobby whose last
+   * client just dropped. The host may have closed the tab, the laptop may
+   * have slept, the network may have blipped — an invite link already in
+   * someone's clipboard must still resolve. A live match is deliberately
+   * excluded: it keeps its own lifecycle (forfeit/resume is the match's
+   * business), and a deliberate leave/close never reaches this path.
+   */
+  private keepWaitingLobbyAlive() {
+    if (this.closed || this.closing || this.keptAliveWithoutClients) return;
+    // Colyseus removes the dropped client from `clients` before calling
+    // onDrop: a non-empty list means someone is still there, so the room
+    // keeps its normal lifecycle.
+    if (this.clients.length > 0) return;
+    if (
+      this.state.phase !== LIFECYCLE.WAITING &&
+      this.state.phase !== LIFECYCLE.READY
+    ) {
+      return;
+    }
+    this.keptAliveWithoutClients = true;
+    this.autoDispose = false;
+    this.keepAliveReaper = this.clock.setTimeout(() => {
+      this.keepAliveReaper = undefined;
+      if (this.closed || this.closing) return;
+      if (this.clients.length > 0) {
+        // A client came back through a path that missed the release hook:
+        // hand the room back to Colyseus' normal lifecycle.
+        this.keptAliveWithoutClients = false;
+        this.autoDispose = true;
+        return;
+      }
+      // Abandoned: drop the durable snapshot too, otherwise the next boot
+      // would revive a lobby nobody is waiting for.
+      this.keptAliveWithoutClients = false;
+      this.autoDispose = true;
+      void roomSnapshotStore.remove(this.roomId).then(() => this.disconnect());
+    }, WAITING_LOBBY_KEEPALIVE_MS);
+  }
+
+  /** A live client is present again: normal dispose-on-empty resumes. */
+  private releaseWaitingLobbyKeepAlive() {
+    if (!this.keptAliveWithoutClients) return;
+    this.keptAliveWithoutClients = false;
+    this.keepAliveReaper?.clear();
+    this.keepAliveReaper = undefined;
+    if (!this.closed && !this.closing) this.autoDispose = true;
+  }
+
   private scheduleClosedRoomCleanup() {
+    this.keptAliveWithoutClients = false;
+    this.keepAliveReaper?.clear();
+    this.keepAliveReaper = undefined;
     this.delay(CLOSED_ROOM_RETENTION_MS, () => {
       this.closedRetentionExpired = true;
       this.autoDispose = true;

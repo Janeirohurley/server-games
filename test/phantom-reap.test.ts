@@ -795,4 +795,44 @@ describe("phantom reaping after the reconnection grace", () => {
     assert.strictEqual(room.state.players.get("user-b")?.connected, false);
     void alice;
   });
+
+  it("keeps a waiting lobby joinable after its last client dies", async () => {
+    const room = (await colyseus.createRoom("ludo", {
+      targetPlayers: 2,
+      reconnectionGrace: 2,
+    })) as LudoRoom;
+    const alice = await colyseus.connectTo(room, {
+      token: await mintToken("user-a", "Alice"),
+    });
+    await tick();
+    assert.strictEqual(room.state.phase, "waiting");
+
+    // Closing the tab must not destroy the table: the invite link may
+    // still be opened after the reconnection window expires.
+    kill(alice);
+    await pastGrace();
+
+    const survived = colyseus.getRoomById<LudoRoom>(room.roomId);
+    assert.ok(survived, "a waiting lobby survives its last client dropping");
+    assert.strictEqual(
+      (survived as unknown as { autoDispose: boolean }).autoDispose,
+      false,
+      "Colyseus auto-dispose is suspended while the lobby is empty",
+    );
+
+    // The pre-shared link still resolves instead of "room not found".
+    // The reaped host left the table empty, so the first invitee is
+    // auto-seated as the new creator.
+    const bob = await colyseus.connectTo(survived, {
+      token: await mintToken("user-b", "Bob"),
+    });
+    await tick();
+    assert.ok(
+      room.state.players.has("user-b"),
+      "the invitee is seated in the surviving lobby",
+    );
+    assert.strictEqual(room.state.hostUserId, "user-b");
+    assert.strictEqual(room.state.phase, "waiting");
+    void bob;
+  });
 });
