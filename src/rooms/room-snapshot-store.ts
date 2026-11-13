@@ -4,7 +4,22 @@ import { matchMaker } from "colyseus";
 import { isDevMode, setDevMode } from "@colyseus/core";
 
 const TABLE = "game_room_snapshots";
-const CLOSED_ROOM_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1_000;
+/**
+ * A durable lobby that has seen no activity for a day is dead: the host
+ * is gone, nobody can approve or start. Closed rooms share the same
+ * window. Without this cap a snapshot restored at boot would live
+ * forever, because a room that never had a live client never triggers
+ * `onLeave` and therefore never auto-disposes.
+ */
+export const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1_000;
+/**
+ * A live room expires its pending join requests after ten minutes
+ * (`JOIN_REQUEST_TTL_MS` in base-game-room.ts). A snapshot whose only
+ * pending requests are older than that is dead too: nobody is waiting,
+ * and restoring it would keep a ghost lobby alive forever because the
+ * restore re-saves it with a fresh `savedAt`, resetting the TTL.
+ */
+const PENDING_REQUEST_TTL_MS = 10 * 60 * 1_000;
 
 export interface PersistedRoomSnapshot {
   roomId: string;
@@ -131,10 +146,34 @@ class RoomSnapshotStore {
       return [];
     }
     try {
+      // Two kinds of dead rows are purged before restoring:
+      //   - stale lobbies/closed rooms older than a day (nobody came back);
+      //   - lobbies with no seated player AND no *fresh* pending join
+      //     request. They can never be started or approved, so restoring
+      //     them would only recreate a ghost visible in the room list. A
+      //     fresh pending request is kept: its invite link must survive,
+      //     and the first human to arrive becomes the host. An expired
+      //     request is not fresh, otherwise a restored ghost would re-save
+      //     itself forever with a new `savedAt`.
+      const now = Date.now();
       await this.sql`
         DELETE FROM ${this.sql(TABLE)}
-        WHERE state->>'phase' = 'closed'
-          AND saved_at < ${Date.now() - CLOSED_ROOM_SNAPSHOT_TTL_MS}
+        WHERE saved_at < ${now - SNAPSHOT_TTL_MS}
+          OR (
+            (state->'players' IS NULL OR state->'players' = '{}'::jsonb)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM jsonb_each(
+                CASE
+                  WHEN jsonb_typeof(state->'pendingPlayerRequests') = 'object'
+                    THEN state->'pendingPlayerRequests'
+                  ELSE '{}'::jsonb
+                END
+              ) AS pending(key, value)
+              WHERE COALESCE((pending.value->>'requestedAt')::bigint, 0)
+                > ${now - PENDING_REQUEST_TTL_MS}
+            )
+          )
       `;
       const rows = await this.sql<{
         room_id: string;
