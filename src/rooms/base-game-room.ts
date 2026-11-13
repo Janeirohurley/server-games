@@ -346,7 +346,6 @@ export abstract class BaseGameRoom<
     }
     this.liveSessions.add(client.sessionId);
 
-<<<<<<< HEAD
     // A lobby revived from a durable snapshot is kept alive with
     // `autoDispose` off so its invite link survives the restart. Now that a
     // live client is here, the normal dispose-on-empty lifecycle resumes.
@@ -356,12 +355,11 @@ export abstract class BaseGameRoom<
     }
     // A live client is here: an empty-lobby keepalive is no longer needed.
     this.releaseWaitingLobbyKeepAlive();
-=======
+
     // Tell the arriving client whether the table is still being prepared
     // (platform bots being seated) so it can render the "préparation"
     // state instead of an apparently empty board.
     this.sendSeatState(client);
->>>>>>> origin/develop
 
     if (this.closed) {
       const canRecoverClosedRoom =
@@ -500,13 +498,6 @@ export abstract class BaseGameRoom<
     const identity = this.identities.get(client.sessionId);
     if (!identity) return;
     this.markSessionDown(client.sessionId, identity.userId, "dropped");
-<<<<<<< HEAD
-    this.allowReconnection(client, this.reconnectionGraceSeconds);
-    // If this was the last client of an un-started lobby, Colyseus would
-    // dispose the room right after the grace and break every invite link.
-    // Keep it reachable; the reaper reclaims it if nobody returns.
-    this.keepWaitingLobbyAlive();
-=======
     // `allowReconnection` returns a promise whose REJECTION is the normal
     // outcome: it rejects with "expired" when the grace window elapses, and
     // immediately with "not joined" when the socket died before the join
@@ -518,7 +509,10 @@ export abstract class BaseGameRoom<
     this.allowReconnection(client, this.reconnectionGraceSeconds).catch(
       () => undefined,
     );
->>>>>>> origin/develop
+    // If this was the last client of an un-started lobby, Colyseus would
+    // dispose the room right after the grace and break every invite link.
+    // Keep it reachable; the reaper reclaims it if nobody returns.
+    this.keepWaitingLobbyAlive();
   }
 
   /** A dropped player made it back inside the grace window. */
